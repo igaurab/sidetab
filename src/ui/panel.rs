@@ -88,12 +88,6 @@ pub struct Switcher {
     address: Option<String>,
     /// live width-drag: window sits at WIDTH_MAX, card renders this wide
     width_preview: Option<f32>,
-    /// fullscreen windows we suspended (internal state set to tiled, app
-    /// still believes it is fullscreen) so a covered sibling could be
-    /// used; re-fullscreened when they regain focus. (addr, client state,
-    /// suspend time — the timestamp filters out the stale focus event
-    /// from the suspend sequence itself)
-    suspended: Vec<(String, i64, std::time::Instant)>,
     fullscreen_active: bool,
     dirty: bool,
     /// the current reveal came from edge hover (auto-hides on leave)
@@ -142,7 +136,6 @@ impl Switcher {
             scope: Scope::All,
             address: None,
             width_preview: None,
-            suspended: Vec::new(),
             fullscreen_active: ctl::active_window_fullscreen(),
             dirty: true,
             hover_originated: false,
@@ -178,10 +171,6 @@ impl Switcher {
 
     fn refresh(&mut self) {
         self.entries = windows::fetch();
-        // drop suspensions whose window closed or was manually
-        // re-fullscreened in the meantime
-        self.suspended
-            .retain(|(a, _, _)| self.entries.iter().any(|e| &e.address == a && !e.fullscreen));
         // drop pins whose window closed (checked against ALL windows,
         // before any workspace filtering, so other-workspace pins survive)
         self.pinned_windows
@@ -574,36 +563,11 @@ impl Switcher {
         .detach();
     }
 
-    /// Focus a window. If a fullscreen sibling on its workspace would keep
-    /// covering it, SUSPEND that sibling's fullscreen first: internal
-    /// state goes back to tiled (the layout re-slots it exactly, since it
-    /// never left the layout tree) while the app keeps believing it is
-    /// fullscreen. It re-fullscreens when it regains focus.
+    /// Focus a window. On a workspace with a fullscreen window, Hyprland
+    /// natively transfers fullscreen to the newly focused window (and back
+    /// when refocusing the original) without ever touching the tiling
+    /// layout — the same behavior as Omarchy's stock Alt+Tab cyclenext.
     fn switch_to_address(&mut self, address: &str) {
-        let Some(t) = self.entries.iter().find(|e| e.address == address).cloned() else {
-            let _ = ctl::focus_window(address);
-            return;
-        };
-        let sibling = self
-            .entries
-            .iter()
-            .find(|e| {
-                e.fullscreen && e.workspace_id == t.workspace_id && e.address != t.address
-            })
-            .map(|e| e.address.clone());
-        if let (false, Some(f)) = (t.fullscreen, sibling) {
-            let client_state = ctl::clients()
-                .ok()
-                .and_then(|cs| cs.into_iter().find(|c| c.address == f))
-                .map(|c| c.fullscreen_client)
-                .unwrap_or(2);
-            // fullscreenstate acts on the active window; focusing the
-            // fullscreen window itself is safe (no fullscreen transfer)
-            let _ = ctl::focus_window(&f);
-            let _ = ctl::dispatch(&format!("fullscreenstate 0 {client_state}"));
-            self.suspended
-                .push((f, client_state, std::time::Instant::now()));
-        }
         let _ = ctl::focus_window(address);
     }
 
@@ -751,18 +715,6 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
                 Mode::Cycling => {}
             },
             HyprEvent::ActiveWindowChanged => {
-                // a suspended-fullscreen window regaining focus resumes
-                // fullscreen (covers panel switches, mouse clicks, other
-                // switchers alike). The age check skips the stale focus
-                // event from the suspend sequence itself.
-                if let Some(active) = ctl::active_address() {
-                    if let Some(pos) = self.suspended.iter().position(|(a, _, t)| {
-                        a == &active && t.elapsed() > Duration::from_millis(500)
-                    }) {
-                        let (_, client_state, _) = self.suspended.remove(pos);
-                        let _ = ctl::dispatch(&format!("fullscreenstate 2 {client_state}"));
-                    }
-                }
                 self.fullscreen_active = ctl::active_window_fullscreen();
                 if self.mode == Mode::Hidden {
                     self.dirty = true;

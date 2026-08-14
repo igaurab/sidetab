@@ -4,7 +4,7 @@
 //! immediately and persists to ~/.config/sidetab/config.toml.
 
 use crate::apps::{class_matches, DesktopApp};
-use crate::config::{Config, CycleScope, Edge, ThemeVariant};
+use crate::config::{Config, CycleScope, Edge, ThemeVariant, WIDTH_MAX, WIDTH_MIN};
 use crate::icons::IconResolver;
 use crate::ui::panel::Switcher;
 use gpui::{
@@ -39,9 +39,6 @@ enum Drag {
     Width,
 }
 
-/// Panel width slider range in logical px.
-const WIDTH_MIN: f32 = 240.0;
-const WIDTH_MAX: f32 = 640.0;
 
 pub struct Settings {
     cfg: Config,
