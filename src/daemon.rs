@@ -78,7 +78,10 @@ fn open_settings(
                 app_id: Some("sidetab-settings".into()),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| crate::ui::settings::Settings::new(cfg, panel_entity)),
+            |window, cx| {
+                window.set_window_title("Sidetab Settings");
+                cx.new(|_| crate::ui::settings::Settings::new(cfg, panel_entity))
+            },
         )
     })??;
     Ok(handle)
@@ -94,6 +97,8 @@ fn find_own_address() -> Option<String> {
 }
 
 pub fn run() -> Result<()> {
+    // Best-effort app-menu integration for cargo-install users.
+    let _ = crate::setup::install_desktop_integration();
     let listener = bind_control_socket()?;
     ctl::apply_panel_rules()?;
     let cfg = Config::load();

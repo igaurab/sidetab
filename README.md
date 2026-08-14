@@ -18,8 +18,9 @@ and hover-reveal at the screen edge. Built in Rust with
 - **App icons** resolved from your icon theme (SVG icons rasterized and cached).
 - **Fuzzy search** (`sidetab search`): type to filter windows, Enter to
   switch, digits 1–9 to jump.
-- **Hover reveal**: an invisible strip at the screen edge; hover to peek at
-  your windows without touching the keyboard. Never steals focus.
+- **Two sidebar modes**: *reveal on hover* (hidden until your cursor touches
+  the screen edge) or *always visible* — a compact Contexts-style sidebar
+  showing icons and workspace headers that smoothly expands on hover.
 - **Mouse friendly**: hover to highlight, click to switch.
 - **Light/dark themes**, following your system preference by default.
 - **Settings GUI** (`sidetab settings`), laid out like the Contexts
@@ -41,6 +42,14 @@ yay -S sidetab
 
 Requires Hyprland ≥ 0.53 (new windowrule syntax), Vulkan, and Rust 1.85+
 if building from source.
+
+### App menu entry
+
+sidetab installs its icon and a `.desktop` launcher into `~/.local/share`
+automatically the first time the daemon starts, so it shows up in app
+launchers even when installed with `cargo install`. To (re)install it
+manually, run `sidetab setup`. The AUR package ships system-wide copies
+instead.
 
 ## Hyprland setup
 
@@ -88,14 +97,13 @@ Settings are edited from the GUI (`sidetab settings`) or by hand in
 `~/.config/sidetab/config.toml`:
 
 ```toml
-position = "left-center"   # left-top | left-center | left-bottom
-                           # right-top | right-center | right-bottom
+edge = "left"              # left | right
 width = 320.0
-margin_px = 24.0           # gap kept from the top/bottom screen edges
-# v_pos = 0.37             # fine-tuned position along the edge (0 top .. 1
-                           # bottom); set from the settings slider / preview
-hover_reveal = true
-hover_strip_px = 4.0       # width of the invisible reveal strip
+v_pos = 0.5                # placement along the edge, 0.0 top .. 1.0 bottom
+                           # (set it visually from the settings slider/preview)
+sidebar = "reveal-on-hover" # reveal-on-hover | always-visible (compact
+                           # icon sidebar stays on screen, hover expands it)
+hover_strip_px = 4.0       # hover target width while hidden (no GUI control)
 show_delay_ms = 120
 hide_delay_ms = 300
 # font = "Inter"           # optional UI font override

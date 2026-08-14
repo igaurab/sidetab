@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Sidetab
+Comment=Contexts-style window switcher for Hyprland
+Exec=sidetab settings
+Icon=sidetab
+Terminal=false
+Categories=Utility;
+StartupWMClass=sidetab-settings

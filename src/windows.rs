@@ -23,9 +23,9 @@ pub fn fetch() -> Vec<WinEntry> {
     };
     let mut entries: Vec<WinEntry> = clients
         .into_iter()
-        .filter(|c| {
-            c.mapped && !c.hidden && !c.class.starts_with("sidetab") && c.workspace.id > 0
-        })
+        // exclude only the panel itself; the settings window is a normal
+        // window and should be listed
+        .filter(|c| c.mapped && !c.hidden && c.class != "sidetab" && c.workspace.id > 0)
         .map(|c| WinEntry {
             address: c.address,
             class: c.class,

@@ -1,7 +1,7 @@
 //! The switcher panel: a Contexts-style sidebar. Owns the presence state
 //! machine — every reveal/hide/focus transition funnels through here.
 
-use crate::config::{Config, Palette};
+use crate::config::{Config, Palette, SidebarMode};
 use crate::daemon::Msg;
 use crate::hypr::ctl;
 use crate::hypr::events::HyprEvent;
@@ -13,6 +13,10 @@ use gpui::{
 use std::time::Duration;
 
 pub const NOFOCUS_TAG: &str = "sidetab-nofocus";
+
+/// Visible width of the collapsed always-visible sidebar: enough for the
+/// row icons and the first few characters, like Contexts' collapsed state.
+const COMPACT_PX: f64 = 76.0;
 
 const ROW_H: f32 = 26.0;
 const GROUP_HEADER_H: f32 = 24.0;
@@ -110,19 +114,31 @@ impl Switcher {
     pub fn set_address(&mut self, address: String, cx: &mut Context<Self>) {
         self.address = Some(address);
         self.set_nofocus(true);
-        self.park();
         // the freshly mapped window may have grabbed focus before the
         // nofocus tag landed — give it back
         if ctl::active_address().as_ref() == self.address.as_ref() {
-            let _ = ctl::dispatch("focuscurrentorlast");
+            let _ = ctl::focus_current_or_last();
         }
-        cx.notify();
+        self.rest(cx);
+    }
+
+    fn always_visible(&self) -> bool {
+        self.cfg.sidebar == SidebarMode::AlwaysVisible
     }
 
     fn set_nofocus(&self, on: bool) {
         if let Some(addr) = &self.address {
             let sign = if on { '+' } else { '-' };
             let _ = ctl::dispatch(&format!("tagwindow {sign}{NOFOCUS_TAG} address:{addr}"));
+        }
+    }
+
+    /// Allow Hyprland to animate the panel's moves/resizes (used for the
+    /// always-visible sidebar's expand/collapse; cycling stays instant).
+    fn set_anim(&self, on: bool) {
+        if let Some(addr) = &self.address {
+            let sign = if on { '+' } else { '-' };
+            let _ = ctl::dispatch(&format!("tagwindow {sign}sidetab-anim address:{addr}"));
         }
     }
 
@@ -219,12 +235,12 @@ impl Switcher {
         let (mw, mh) = mon.logical_size();
         let w = self.cfg.width as f64;
         let h = (self.content_height() as f64 + 4.0).min(mh - 16.0);
-        let strip = if self.cfg.hover_reveal && !self.fullscreen_active {
-            self.cfg.hover_strip_px as f64
-        } else {
+        let strip = if self.fullscreen_active {
             -8.0 // park fully offscreen
+        } else {
+            self.cfg.hover_strip_px as f64
         };
-        let (x_shown, x_hidden) = if self.cfg.position.is_left() {
+        let (x_shown, x_hidden) = if self.cfg.edge.is_left() {
             (mon.x as f64, mon.x as f64 - w + strip)
         } else {
             (
@@ -238,11 +254,9 @@ impl Switcher {
                 mon.y as f64 + (mh - h) / 2.0,
             )
         } else {
-            // slide along the edge between margins: 0 = top, 1 = bottom
+            // slide along the edge: 0 = top, 1 = bottom
             let frac = self.cfg.v_frac() as f64;
-            let margin = self.cfg.margin_px as f64;
-            let usable = (mh - h - 2.0 * margin).max(0.0);
-            (x_shown, mon.y as f64 + margin + usable * frac)
+            (x_shown, mon.y as f64 + (mh - h).max(0.0) * frac)
         };
         (x_shown as i64, x_hidden as i64, y as i64, w as i64, h as i64)
     }
@@ -252,11 +266,32 @@ impl Switcher {
             return;
         };
         let (x_shown, x_hidden, y, w, h) = self.geometry(&mon);
-        let x = if revealed { x_shown } else { x_hidden };
+        // resting state in always-visible mode: a narrow panel at the edge
+        // showing icons + a few characters (Contexts' collapsed sidebar),
+        // resized rather than slid so the icon column stays visible
+        let (x, w) = if revealed {
+            (x_shown, w)
+        } else if self.always_visible() && !self.fullscreen_active {
+            let (mw, _) = mon.logical_size();
+            let cw = COMPACT_PX as i64;
+            let x = if self.cfg.edge.is_left() {
+                mon.x
+            } else {
+                mon.x + mw as i64 - cw
+            };
+            (x, cw)
+        } else {
+            (x_hidden, w)
+        };
         let _ = ctl::batch(&[
             format!("dispatch resizewindowpixel exact {w} {h},address:{addr}"),
             format!("dispatch movewindowpixel exact {x} {y},address:{addr}"),
         ]);
+    }
+
+    /// True while resting as the narrow always-visible sidebar.
+    fn compact(&self) -> bool {
+        self.always_visible() && matches!(self.mode, Mode::Hidden | Mode::HoverPending)
     }
 
     fn park(&self) {
@@ -277,9 +312,7 @@ impl Switcher {
         cx.notify();
     }
 
-    fn hide_now(&mut self, cx: &mut Context<Self>) {
-        self.set_nofocus(true);
-        self.mode = Mode::Hidden;
+    fn end_interaction(&mut self) {
         self.scope = Scope::All;
         self.hover_originated = false;
         self.outside_polls = 0;
@@ -288,15 +321,38 @@ impl Switcher {
         self.reveal_gen += 1; // cancel pending reveals
         self.hide_gen += 1;
         self.dirty = true;
-        self.park();
         // follow_mouse may have focused the panel while it was visible;
         // hand focus back if we still hold it
         if let (Some(active), Some(own)) = (ctl::active_address(), self.address.as_ref()) {
             if &active == own {
-                let _ = ctl::dispatch("focuscurrentorlast");
+                let _ = ctl::focus_current_or_last();
             }
         }
+    }
+
+    /// Park off-screen (explicit hide, or resting state in hover mode).
+    fn hide_now(&mut self, cx: &mut Context<Self>) {
+        self.set_nofocus(true);
+        self.mode = Mode::Hidden;
+        self.end_interaction();
+        self.park();
         cx.notify();
+    }
+
+    /// Return to the resting state after any interaction. In hover mode
+    /// that parks nearly offscreen; in always-visible mode the same park
+    /// leaves the compact sidebar (icons + workspace headers) showing.
+    fn rest(&mut self, cx: &mut Context<Self>) {
+        let keep_fresh = self.always_visible();
+        self.set_anim(keep_fresh);
+        self.hide_now(cx);
+        if keep_fresh {
+            // the compact sidebar stays visible, so keep its content current
+            self.refresh();
+            self.selected = self.mru_position();
+            self.place(false);
+            cx.notify();
+        }
     }
 
     /// Cursor watcher, since gpui cannot always see enter/leave here:
@@ -308,7 +364,7 @@ impl Switcher {
         }
         match self.mode {
             Mode::Hidden | Mode::HoverPending => {
-                if !self.cfg.hover_reveal || self.fullscreen_active {
+                if self.fullscreen_active {
                     return;
                 }
                 let (Some((cur_x, cur_y)), Some(mon)) = (ctl::cursor_pos(), self.monitor())
@@ -316,11 +372,15 @@ impl Switcher {
                     return;
                 };
                 let (_, _, y, _, h) = self.geometry(&mon);
-                let zone = (self.cfg.hover_strip_px as f64).max(6.0);
+                let zone = if self.always_visible() {
+                    COMPACT_PX + 2.0
+                } else {
+                    (self.cfg.hover_strip_px as f64).max(6.0)
+                };
                 let (mw, _) = mon.logical_size();
                 let in_strip = cur_y >= y as f64
                     && cur_y <= (y + h) as f64
-                    && if self.cfg.position.is_left() {
+                    && if self.cfg.edge.is_left() {
                         cur_x <= mon.x as f64 + zone
                     } else {
                         cur_x >= mon.x as f64 + mw - zone
@@ -345,6 +405,17 @@ impl Switcher {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// In always-visible mode the parked panel's compact strip is on
+    /// screen, so its list must stay current even while "hidden".
+    fn refresh_compact(&mut self, cx: &mut Context<Self>) {
+        if self.always_visible() && self.mode == Mode::Hidden {
+            self.refresh();
+            self.selected = self.mru_position();
+            self.place(false);
+            cx.notify();
         }
     }
 
@@ -392,7 +463,10 @@ impl Switcher {
                 .timer(Duration::from_millis(delay_ms))
                 .await;
             this.update(cx, |this, cx| {
-                if this.hide_gen == generation && this.mode == Mode::Revealed {
+                if this.hide_gen == generation
+                    && this.mode == Mode::Revealed
+                    && this.hover_originated
+                {
                     // spurious leave events fire when the window moves under
                     // a stationary cursor; only hide if the cursor truly left
                     if this.cursor_inside_panel() {
@@ -411,7 +485,7 @@ impl Switcher {
         if let Some(entry) = self.selected_entry() {
             let _ = ctl::focus_window(&entry.address);
         }
-        self.hide_now(cx);
+        self.rest(cx);
     }
 
     fn step(&mut self, delta: i64, cx: &mut Context<Self>) {
@@ -447,6 +521,7 @@ impl Switcher {
                     self.step(delta, cx);
                 } else {
                     self.scope = scope;
+                    self.set_anim(false); // the centered overlay pops instantly
                     self.refresh();
                     self.mode = Mode::Cycling;
                     self.selected = if delta > 0 {
@@ -505,7 +580,10 @@ impl Switcher {
                 }
             }
             HyprEvent::WindowsChanged => match self.mode {
-                Mode::Hidden | Mode::HoverPending => self.dirty = true,
+                Mode::Hidden | Mode::HoverPending => {
+                    self.dirty = true;
+                    self.refresh_compact(cx);
+                }
                 Mode::Revealed | Mode::Search => {
                     let keep = self.selected_entry().map(|e| e.address.clone());
                     self.refresh();
@@ -528,6 +606,7 @@ impl Switcher {
                 if self.mode == Mode::Hidden {
                     self.dirty = true;
                     self.park();
+                    self.refresh_compact(cx);
                 }
             }
             HyprEvent::FullscreenChanged(active) => {
@@ -561,7 +640,7 @@ impl Switcher {
         }
         let key = ev.keystroke.key.as_str();
         match key {
-            "escape" => self.hide_now(cx),
+            "escape" => self.rest(cx),
             "enter" => self.focus_selected_and_hide(cx),
             "down" => self.step(1, cx),
             "up" => self.step(-1, cx),
@@ -613,7 +692,7 @@ impl Switcher {
     fn on_hover_change(&mut self, hovered: bool, cx: &mut Context<Self>) {
         if hovered {
             self.hide_gen += 1; // cancel pending hides
-            if self.mode == Mode::Hidden && self.cfg.hover_reveal && !self.fullscreen_active {
+            if self.mode == Mode::Hidden && !self.fullscreen_active {
                 self.mode = Mode::HoverPending;
                 self.schedule_reveal(self.cfg.show_delay_ms, cx);
             }
@@ -645,17 +724,17 @@ impl Switcher {
 
     pub fn preview_end(&mut self, cx: &mut Context<Self>) {
         if self.mode == Mode::Revealed {
-            self.hide_now(cx);
+            self.rest(cx);
         }
     }
 
     pub fn update_config(&mut self, cfg: Config, cx: &mut Context<Self>) {
         self.cfg = cfg;
         self.palette = self.cfg.theme.palette();
-        if self.mode == Mode::Hidden {
-            self.park();
-        } else {
-            self.place(true);
+        match self.mode {
+            // re-settle into the (possibly changed) resting state
+            Mode::Hidden | Mode::Revealed => self.rest(cx),
+            _ => self.place(true),
         }
         cx.notify();
     }
@@ -704,7 +783,7 @@ impl Switcher {
         };
         let icon = self.icons.resolve(&entry.class, &entry.initial_class);
         let address = entry.address.clone();
-        let show_digit = position < 9 && !self.searching();
+        let show_digit = position < 9 && !self.searching() && !self.compact();
 
         div()
             .id(("row", entry_ix))
@@ -753,7 +832,7 @@ impl Switcher {
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     let _ = ctl::focus_window(&address);
-                    this.hide_now(cx);
+                    this.rest(cx);
                 }),
             )
     }
@@ -762,7 +841,7 @@ impl Switcher {
 impl Render for Switcher {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
-        let left = self.cfg.position.is_left();
+        let left = self.cfg.edge.is_left();
         let searching = self.searching();
 
         // no scrolling: the window is always sized to fit every row
@@ -862,7 +941,7 @@ impl Render for Switcher {
                             },
                         ))
                     })
-                    .when(self.mode != Mode::Search, |d| {
+                    .when(self.mode != Mode::Search && !self.compact(), |d| {
                         d.child(
                             div()
                                 .id("gear")

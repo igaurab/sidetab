@@ -4,6 +4,7 @@ mod config;
 mod daemon;
 mod hypr;
 mod icons;
+mod setup;
 mod ui;
 mod windows;
 
@@ -25,6 +26,7 @@ COMMANDS:
     hide      hide the panel
     search    open the panel with keyboard focus and fuzzy search
     settings  open the settings window
+    setup     install the app-menu entry and icon (also done on daemon start)
     quit      stop the daemon
 
 CONFIG:
@@ -40,6 +42,16 @@ fn main() -> anyhow::Result<()> {
         }
         Some("-V" | "--version" | "version") => {
             println!("sidetab {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some("setup") => {
+            setup::install_desktop_integration()?;
+            for path in [setup::icon_path(), setup::desktop_entry_path()]
+                .into_iter()
+                .flatten()
+            {
+                println!("installed {}", path.display());
+            }
             Ok(())
         }
         Some("quit") => client::send("quit"),

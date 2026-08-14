@@ -3,7 +3,7 @@
 //! right. Lives in the daemon; every change applies to the panel
 //! immediately and persists to ~/.config/sidetab/config.toml.
 
-use crate::config::{Config, Position, ThemeVariant};
+use crate::config::{Config, Edge, SidebarMode, ThemeVariant};
 use crate::ui::panel::Switcher;
 use gpui::{
     canvas, div, prelude::*, px, rgba, svg, Bounds, Context, Entity, MouseButton,
@@ -94,18 +94,14 @@ impl Settings {
                 let Some(b) = self.track_bounds else { return };
                 let usable = (f32::from(b.size.width) - 16.0).max(1.0);
                 let frac = ((f32::from(pos.x) - f32::from(b.origin.x) - 8.0) / usable).clamp(0.0, 1.0);
-                self.cfg.v_pos = Some(frac);
+                self.cfg.v_pos = frac;
             }
             Some(Drag::Preview) => {
                 let Some(b) = self.preview_bounds else { return };
                 let frac = ((f32::from(pos.y) - f32::from(b.origin.y)) / f32::from(b.size.height).max(1.0)).clamp(0.0, 1.0);
                 let left = f32::from(pos.x) < f32::from(b.origin.x) + f32::from(b.size.width) / 2.0;
-                self.cfg.v_pos = Some(frac);
-                self.cfg.position = if left {
-                    Position::LeftCenter
-                } else {
-                    Position::RightCenter
-                };
+                self.cfg.v_pos = frac;
+                self.cfg.edge = if left { Edge::Left } else { Edge::Right };
             }
             None => return,
         }
@@ -227,37 +223,6 @@ impl Settings {
             )
     }
 
-    fn toggle(
-        &self,
-        id: &'static str,
-        on: bool,
-        flip: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        u: &Ui,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id((id, 0usize))
-            .w(px(40.))
-            .h(px(22.))
-            .rounded(px(11.))
-            .p(px(2.))
-            .bg(rgba(if on { u.accent } else { u.row }))
-            .flex()
-            .when(on, |d| d.justify_end())
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| flip(this, cx)),
-            )
-            .child(
-                div()
-                    .w(px(18.))
-                    .h(px(18.))
-                    .rounded(px(9.))
-                    .bg(gpui::white()),
-            )
-    }
-
     fn row(&self, label: &'static str, control: impl IntoElement, u: &Ui) -> impl IntoElement {
         div()
             .flex()
@@ -290,33 +255,44 @@ impl Settings {
             .flex()
             .flex_col()
             .child(self.heading("General", u))
-            .child(self.row(
-                "Reveal on edge hover",
-                self.toggle(
-                    "hover",
-                    cfg.hover_reveal,
-                    |this, cx| this.mutate(|c| c.hover_reveal = !c.hover_reveal, cx),
-                    u,
-                    cx,
+            .child(div().pb(px(6.)).text_color(rgba(u.text)).child("Sidebar"))
+            .child(
+                div().flex().gap(px(6.)).children(
+                    [
+                        (SidebarMode::RevealOnHover, "Reveal on hover"),
+                        (SidebarMode::AlwaysVisible, "Always visible"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, (mode, label))| {
+                        self.chip(
+                            ("sidebar", ix),
+                            label.to_string(),
+                            cfg.sidebar == mode,
+                            move |this, cx| this.mutate(|c| c.sidebar = mode, cx),
+                            u,
+                            cx,
+                        )
+                    }),
                 ),
+            )
+            .child(self.hint(
+                match cfg.sidebar {
+                    SidebarMode::RevealOnHover => {
+                        "The sidebar stays hidden until your cursor touches the \
+                         screen edge, then slides in and hides again when you \
+                         move away."
+                    }
+                    SidebarMode::AlwaysVisible => {
+                        "A compact sidebar with your app icons and workspace \
+                         headers stays on screen; hovering it expands the full \
+                         panel, like Contexts."
+                    }
+                }
+                .to_string(),
                 u,
             ))
-            .child(self.row(
-                "Edge strip width",
-                self.stepper(
-                    "strip",
-                    format!("{}px", cfg.hover_strip_px as i64),
-                    |this, cx| {
-                        this.mutate(|c| c.hover_strip_px = (c.hover_strip_px - 1.0).max(2.0), cx)
-                    },
-                    |this, cx| {
-                        this.mutate(|c| c.hover_strip_px = (c.hover_strip_px + 1.0).min(16.0), cx)
-                    },
-                    u,
-                    cx,
-                ),
-                u,
-            ))
+            .child(div().pt(px(10.)))
             .child(self.row(
                 "Show delay",
                 self.stepper(
@@ -348,8 +324,8 @@ impl Settings {
                 u,
             ))
             .child(self.hint(
-                "Hovering the screen edge peeks at your windows without \
-                 touching the keyboard."
+                "Show and hide delay control how quickly the sidebar expands \
+                 when hovered and retracts after the cursor leaves."
                     .to_string(),
                 u,
             ))
@@ -357,32 +333,19 @@ impl Settings {
 
     fn panel_pane(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
         let cfg = self.cfg.clone();
-        let position_grid = div().flex().flex_col().gap(px(6.)).children(
-            [&Position::ALL[..3], &Position::ALL[3..]]
+        let edge_row = div().flex().gap(px(6.)).children(
+            [(Edge::Left, "Left"), (Edge::Right, "Right")]
                 .into_iter()
                 .enumerate()
-                .map(|(row_ix, row)| {
-                    div().flex().gap(px(6.)).children(row.iter().enumerate().map(
-                        |(col_ix, &pos)| {
-                            let active = cfg.position == pos && cfg.v_pos.is_none();
-                            self.chip(
-                                ("pos", row_ix * 3 + col_ix),
-                                pos.label().to_string(),
-                                active,
-                                move |this, cx| {
-                                    this.mutate(
-                                        |c| {
-                                            c.position = pos;
-                                            c.v_pos = None;
-                                        },
-                                        cx,
-                                    )
-                                },
-                                u,
-                                cx,
-                            )
-                        },
-                    ))
+                .map(|(ix, (edge, label))| {
+                    self.chip(
+                        ("edge", ix),
+                        label.to_string(),
+                        cfg.edge == edge,
+                        move |this, cx| this.mutate(|c| c.edge = edge, cx),
+                        u,
+                        cx,
+                    )
                 }),
         );
 
@@ -442,9 +405,8 @@ impl Settings {
         // -- mini screen preview --
         let (pw, ph) = (176.0_f32, 99.0_f32);
         let bar_h = 30.0_f32;
-        let m = (cfg.margin_px / 1440.0) * ph;
-        let bar_y = m + ((ph - bar_h - 2.0 * m).max(0.0)) * frac;
-        let bar_x = if cfg.position.is_left() { 3.0 } else { pw - 9.0 - 3.0 };
+        let bar_y = (ph - bar_h) * frac;
+        let bar_x = if cfg.edge.is_left() { 3.0 } else { pw - 9.0 - 3.0 };
         let entity = cx.entity();
         let preview = div()
             .id("posprev")
@@ -502,26 +464,14 @@ impl Settings {
                 ),
                 u,
             ))
-            .child(self.row(
-                "Edge margin",
-                self.stepper(
-                    "margin",
-                    format!("{}px", cfg.margin_px as i64),
-                    |this, cx| this.mutate(|c| c.margin_px = (c.margin_px - 8.0).max(0.0), cx),
-                    |this, cx| this.mutate(|c| c.margin_px = (c.margin_px + 8.0).min(240.0), cx),
-                    u,
-                    cx,
-                ),
-                u,
-            ))
-            .child(div().pt(px(8.)).pb(px(4.)).text_color(rgba(u.text)).child("Position"))
-            .child(position_grid)
+            .child(div().pt(px(8.)).pb(px(4.)).text_color(rgba(u.text)).child("Edge"))
+            .child(edge_row)
             .child(
                 div()
                     .pt(px(12.))
                     .pb(px(4.))
                     .text_color(rgba(u.text))
-                    .child("Fine-tune"),
+                    .child("Placement"),
             )
             .child(
                 div()
@@ -541,8 +491,8 @@ impl Settings {
                             ))
                             .child(self.hint(
                                 "Drag the slider — or the panel inside the mini \
-                                 screen — to place it exactly. The real panel \
-                                 previews live while you drag."
+                                 screen — to place it anywhere along the edge. \
+                                 The real panel previews live while you drag."
                                     .to_string(),
                                 u,
                             )),

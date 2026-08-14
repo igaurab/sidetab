@@ -137,6 +137,9 @@ pub fn apply_panel_rules() -> Result<()> {
         // no_focus is tag-scoped so the daemon can lift it for search mode
         // (tagwindow +/- sidetab-nofocus); a class rule could never be lifted.
         "no_focus on, match:tag sidetab-nofocus",
+        // the always-visible sidebar animates its expand/collapse; the tag
+        // overrides the class-wide no_anim above
+        "no_anim off, match:tag sidetab-anim",
         "float on, match:class sidetab-settings",
         "size 620 460, match:class sidetab-settings",
         "center on, match:class sidetab-settings",
@@ -149,6 +152,30 @@ pub fn apply_panel_rules() -> Result<()> {
     )
 }
 
+fn no_warps_enabled() -> bool {
+    request("getoption cursor:no_warps")
+        .map(|s| s.contains("int: 1"))
+        .unwrap_or(false)
+}
+
+/// Dispatch without letting Hyprland warp the cursor to the focused
+/// window (restores the user's own no_warps setting afterwards).
+fn dispatch_no_warp(args: &str) -> Result<()> {
+    if no_warps_enabled() {
+        dispatch(args)
+    } else {
+        batch(&[
+            "keyword cursor:no_warps true".to_string(),
+            format!("dispatch {args}"),
+            "keyword cursor:no_warps false".to_string(),
+        ])
+    }
+}
+
 pub fn focus_window(address: &str) -> Result<()> {
-    dispatch(&format!("focuswindow address:{address}"))
+    dispatch_no_warp(&format!("focuswindow address:{address}"))
+}
+
+pub fn focus_current_or_last() -> Result<()> {
+    dispatch_no_warp("focuscurrentorlast")
 }

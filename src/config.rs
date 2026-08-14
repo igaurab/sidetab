@@ -4,51 +4,25 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Position {
-    LeftTop,
-    LeftCenter,
-    LeftBottom,
-    RightTop,
-    RightCenter,
-    RightBottom,
+pub enum Edge {
+    Left,
+    Right,
 }
 
-impl Position {
+impl Edge {
     pub fn is_left(self) -> bool {
-        matches!(
-            self,
-            Position::LeftTop | Position::LeftCenter | Position::LeftBottom
-        )
+        self == Edge::Left
     }
+}
 
-    /// 0.0 = top, 0.5 = center, 1.0 = bottom
-    pub fn v_align(self) -> f32 {
-        match self {
-            Position::LeftTop | Position::RightTop => 0.0,
-            Position::LeftCenter | Position::RightCenter => 0.5,
-            Position::LeftBottom | Position::RightBottom => 1.0,
-        }
-    }
-
-    pub const ALL: [Position; 6] = [
-        Position::LeftTop,
-        Position::LeftCenter,
-        Position::LeftBottom,
-        Position::RightTop,
-        Position::RightCenter,
-        Position::RightBottom,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Position::LeftTop => "Top Left",
-            Position::LeftCenter => "Middle Left",
-            Position::LeftBottom => "Bottom Left",
-            Position::RightTop => "Top Right",
-            Position::RightCenter => "Middle Right",
-            Position::RightBottom => "Bottom Right",
-        }
-    }
+/// How the docked sidebar behaves when you're not interacting with it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarMode {
+    /// Panel stays on the screen edge permanently, like Contexts' sidebar.
+    AlwaysVisible,
+    /// Panel hides off-screen and slides in when the cursor hits the edge.
+    RevealOnHover,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -164,14 +138,13 @@ pub fn parse_hex(s: &str) -> Option<u32> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub position: Position,
+    pub edge: Edge,
     pub width: f32,
-    /// Gap kept between the panel and the top/bottom screen edges.
-    pub margin_px: f32,
-    /// Fine-tuned vertical position along the edge, 0.0 (top) to 1.0
-    /// (bottom). None = use the preset from `position`.
-    pub v_pos: Option<f32>,
-    pub hover_reveal: bool,
+    /// Placement along the edge, 0.0 (top) to 1.0 (bottom).
+    pub v_pos: f32,
+    pub sidebar: SidebarMode,
+    /// Width of the hover-target sliver left visible while hidden
+    /// (not exposed in the GUI).
     pub hover_strip_px: f32,
     pub show_delay_ms: u64,
     pub hide_delay_ms: u64,
@@ -185,11 +158,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            position: Position::LeftCenter,
+            edge: Edge::Left,
             width: 320.0,
-            margin_px: 24.0,
-            v_pos: None,
-            hover_reveal: true,
+            v_pos: 0.5,
+            sidebar: SidebarMode::RevealOnHover,
             hover_strip_px: 4.0,
             show_delay_ms: 120,
             hide_delay_ms: 300,
@@ -207,12 +179,9 @@ pub fn config_path() -> PathBuf {
 }
 
 impl Config {
-    /// Vertical placement fraction along the edge (0 top .. 1 bottom):
-    /// the fine-tuned value if set, else the `position` preset.
+    /// Placement fraction along the edge, clamped to 0 (top) .. 1 (bottom).
     pub fn v_frac(&self) -> f32 {
-        self.v_pos
-            .unwrap_or_else(|| self.position.v_align())
-            .clamp(0.0, 1.0)
+        self.v_pos.clamp(0.0, 1.0)
     }
 
     pub fn load() -> Config {
