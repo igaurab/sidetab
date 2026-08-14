@@ -89,6 +89,7 @@ Settings are edited from the GUI (`sidetab settings`) or by hand in
 position = "left-center"   # left-top | left-center | left-bottom
                            # right-top | right-center | right-bottom
 width = 320.0
+margin_px = 24.0           # gap from the screen edge for top/bottom placements
 hover_reveal = true
 hover_strip_px = 4.0       # width of the invisible reveal strip
 show_delay_ms = 120

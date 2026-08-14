@@ -166,6 +166,9 @@ pub fn parse_hex(s: &str) -> Option<u32> {
 pub struct Config {
     pub position: Position,
     pub width: f32,
+    /// Gap between the panel and the screen edge it is vertically aligned
+    /// to (top/bottom positions; center ignores it).
+    pub margin_px: f32,
     pub hover_reveal: bool,
     pub hover_strip_px: f32,
     pub show_delay_ms: u64,
@@ -182,6 +185,7 @@ impl Default for Config {
         Config {
             position: Position::LeftCenter,
             width: 320.0,
+            margin_px: 24.0,
             hover_reveal: true,
             hover_strip_px: 4.0,
             show_delay_ms: 120,

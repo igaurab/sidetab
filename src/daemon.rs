@@ -65,7 +65,7 @@ fn open_settings(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: gpui::point(px(0.), px(0.)),
-                    size: size(px(440.), px(660.)),
+                    size: size(px(620.), px(460.)),
                 })),
                 titlebar: None,
                 focus: true,

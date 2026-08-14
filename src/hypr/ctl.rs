@@ -109,6 +109,20 @@ pub fn active_window_fullscreen() -> bool {
         .unwrap_or(false)
 }
 
+/// Cursor position in logical layout coordinates.
+pub fn cursor_pos() -> Option<(f64, f64)> {
+    let raw = request("cursorpos").ok()?;
+    let (x, y) = raw.trim().split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+pub fn active_address() -> Option<String> {
+    request("j/activewindow")
+        .ok()
+        .and_then(|raw| serde_json::from_str::<ActiveWindow>(&raw).ok())
+        .and_then(|w| w.address)
+}
+
 /// Rules that make the panel behave: floating, pinned across workspaces,
 /// chromeless, instant, and never taking keyboard focus (hover must not
 /// steal focus with follow_mouse=1). Re-applied on configreloaded.
@@ -124,7 +138,7 @@ pub fn apply_panel_rules() -> Result<()> {
         // (tagwindow +/- sidetab-nofocus); a class rule could never be lifted.
         "no_focus on, match:tag sidetab-nofocus",
         "float on, match:class sidetab-settings",
-        "size 440 660, match:class sidetab-settings",
+        "size 620 460, match:class sidetab-settings",
         "center on, match:class sidetab-settings",
     ];
     batch(

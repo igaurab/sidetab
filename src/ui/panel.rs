@@ -58,6 +58,10 @@ pub struct Switcher {
     address: Option<String>,
     fullscreen_active: bool,
     dirty: bool,
+    /// the current reveal came from edge hover (auto-hides on leave)
+    hover_originated: bool,
+    /// consecutive polls with the cursor outside the revealed panel
+    outside_polls: u8,
     reveal_gen: u64,
     hide_gen: u64,
     icons: IconResolver,
@@ -66,6 +70,19 @@ pub struct Switcher {
 
 impl Switcher {
     pub fn new(cfg: Config, cx: &mut Context<Self>) -> Self {
+        // Hyprland delivers no pointer input to no_focus windows, so the
+        // parked edge strip cannot see hover events. Poll the cursor
+        // instead while hidden; once revealed the tag is lifted and real
+        // pointer events take over.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(180))
+                .await;
+            if this.update(cx, |this, cx| this.poll_edge(cx)).is_err() {
+                return;
+            }
+        })
+        .detach();
         let palette = cfg.theme.palette();
         Switcher {
             cfg,
@@ -81,6 +98,8 @@ impl Switcher {
             address: None,
             fullscreen_active: ctl::active_window_fullscreen(),
             dirty: true,
+            hover_originated: false,
+            outside_polls: 0,
             reveal_gen: 0,
             hide_gen: 0,
             icons: IconResolver::new(),
@@ -89,10 +108,22 @@ impl Switcher {
     }
 
     pub fn set_address(&mut self, address: String, cx: &mut Context<Self>) {
-        self.address = Some(address.clone());
-        let _ = ctl::dispatch(&format!("tagwindow +{NOFOCUS_TAG} address:{address}"));
+        self.address = Some(address);
+        self.set_nofocus(true);
         self.park();
+        // the freshly mapped window may have grabbed focus before the
+        // nofocus tag landed — give it back
+        if ctl::active_address().as_ref() == self.address.as_ref() {
+            let _ = ctl::dispatch("focuscurrentorlast");
+        }
         cx.notify();
+    }
+
+    fn set_nofocus(&self, on: bool) {
+        if let Some(addr) = &self.address {
+            let sign = if on { '+' } else { '-' };
+            let _ = ctl::dispatch(&format!("tagwindow {sign}{NOFOCUS_TAG} address:{addr}"));
+        }
     }
 
     // ---- data ----
@@ -207,10 +238,17 @@ impl Switcher {
                 mon.y as f64 + (mh - h) / 2.0,
             )
         } else {
-            (
-                x_shown,
-                mon.y as f64 + (mh - h) * self.cfg.position.v_align() as f64,
-            )
+            // margin keeps top/bottom placements off the screen edge;
+            // center alignment ignores it
+            let align = self.cfg.position.v_align() as f64;
+            let margin = if align < 0.25 {
+                self.cfg.margin_px as f64
+            } else if align > 0.75 {
+                -(self.cfg.margin_px as f64)
+            } else {
+                0.0
+            };
+            (x_shown, mon.y as f64 + (mh - h) * align + margin)
         };
         (x_shown as i64, x_hidden as i64, y as i64, w as i64, h as i64)
     }
@@ -239,24 +277,93 @@ impl Switcher {
         }
         self.palette = self.cfg.theme.palette();
         self.place(true);
+        // visible panels must receive pointer input (hover + clicks),
+        // which Hyprland withholds from no_focus windows
+        self.set_nofocus(false);
         cx.notify();
     }
 
     fn hide_now(&mut self, cx: &mut Context<Self>) {
-        if self.mode == Mode::Search {
-            if let Some(addr) = &self.address {
-                let _ = ctl::dispatch(&format!("tagwindow +{NOFOCUS_TAG} address:{addr}"));
-            }
-        }
+        self.set_nofocus(true);
         self.mode = Mode::Hidden;
         self.scope = Scope::All;
+        self.hover_originated = false;
+        self.outside_polls = 0;
         self.query.clear();
         self.filtered.clear();
         self.reveal_gen += 1; // cancel pending reveals
         self.hide_gen += 1;
         self.dirty = true;
         self.park();
+        // follow_mouse may have focused the panel while it was visible;
+        // hand focus back if we still hold it
+        if let (Some(active), Some(own)) = (ctl::active_address(), self.address.as_ref()) {
+            if &active == own {
+                let _ = ctl::dispatch("focuscurrentorlast");
+            }
+        }
         cx.notify();
+    }
+
+    /// Cursor watcher, since gpui cannot always see enter/leave here:
+    /// while hidden it waits for the cursor to dwell on the edge strip,
+    /// and while hover-revealed it hides once the cursor has left.
+    fn poll_edge(&mut self, cx: &mut Context<Self>) {
+        if self.address.is_none() {
+            return;
+        }
+        match self.mode {
+            Mode::Hidden | Mode::HoverPending => {
+                if !self.cfg.hover_reveal || self.fullscreen_active {
+                    return;
+                }
+                let (Some((cur_x, cur_y)), Some(mon)) = (ctl::cursor_pos(), self.monitor())
+                else {
+                    return;
+                };
+                let (_, _, y, _, h) = self.geometry(&mon);
+                let zone = (self.cfg.hover_strip_px as f64).max(6.0);
+                let (mw, _) = mon.logical_size();
+                let in_strip = cur_y >= y as f64
+                    && cur_y <= (y + h) as f64
+                    && if self.cfg.position.is_left() {
+                        cur_x <= mon.x as f64 + zone
+                    } else {
+                        cur_x >= mon.x as f64 + mw - zone
+                    };
+                if self.mode == Mode::Hidden && in_strip {
+                    self.mode = Mode::HoverPending;
+                    self.schedule_reveal(self.cfg.show_delay_ms, cx);
+                } else if self.mode == Mode::HoverPending && !in_strip {
+                    self.mode = Mode::Hidden;
+                    self.reveal_gen += 1;
+                }
+            }
+            Mode::Revealed if self.hover_originated => {
+                if self.cursor_inside_panel() {
+                    self.outside_polls = 0;
+                } else {
+                    self.outside_polls = self.outside_polls.saturating_add(1);
+                    let outside_ms = self.outside_polls as u64 * 180;
+                    if outside_ms >= self.cfg.hide_delay_ms.max(200) {
+                        self.hide_now(cx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True if the cursor is currently inside the revealed panel rect.
+    fn cursor_inside_panel(&self) -> bool {
+        let (Some((cur_x, cur_y)), Some(mon)) = (ctl::cursor_pos(), self.monitor()) else {
+            return false;
+        };
+        let (x, _, y, w, h) = self.geometry(&mon);
+        cur_x >= x as f64
+            && cur_x <= (x + w) as f64
+            && cur_y >= y as f64
+            && cur_y <= (y + h) as f64
     }
 
     fn schedule_reveal(&mut self, delay_ms: u64, cx: &mut Context<Self>) {
@@ -272,6 +379,8 @@ impl Switcher {
                 {
                     if this.mode == Mode::HoverPending {
                         this.mode = Mode::Revealed;
+                        this.hover_originated = true;
+                        this.outside_polls = 0;
                     }
                     this.reveal_now(cx);
                 }
@@ -290,7 +399,13 @@ impl Switcher {
                 .await;
             this.update(cx, |this, cx| {
                 if this.hide_gen == generation && this.mode == Mode::Revealed {
-                    this.hide_now(cx);
+                    // spurious leave events fire when the window moves under
+                    // a stationary cursor; only hide if the cursor truly left
+                    if this.cursor_inside_panel() {
+                        this.schedule_hide(this.cfg.hide_delay_ms.max(150), cx);
+                    } else {
+                        this.hide_now(cx);
+                    }
                 }
             })
             .ok();
@@ -374,12 +489,9 @@ impl Switcher {
                 self.mode = Mode::Search;
                 self.query.clear();
                 self.selected = self.mru_position();
-                self.reveal_now(cx);
+                self.reveal_now(cx); // also lifts the nofocus tag
                 if let Some(addr) = &self.address {
-                    let _ = ctl::batch(&[
-                        format!("dispatch tagwindow -{NOFOCUS_TAG} address:{addr}"),
-                        format!("dispatch focuswindow address:{addr}"),
-                    ]);
+                    let _ = ctl::focus_window(addr);
                 }
                 window.focus(&self.focus_handle);
             }
@@ -391,12 +503,8 @@ impl Switcher {
         match ev {
             HyprEvent::ConfigReloaded => {
                 let _ = ctl::apply_panel_rules();
-                if let Some(addr) = &self.address {
-                    if self.mode != Mode::Search {
-                        let _ = ctl::dispatch(&format!("tagwindow +{NOFOCUS_TAG} address:{addr}"));
-                    }
-                }
                 if self.mode == Mode::Hidden {
+                    self.set_nofocus(true);
                     self.park();
                 } else {
                     self.place(true);
