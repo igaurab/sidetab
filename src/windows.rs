@@ -43,24 +43,21 @@ pub fn fetch() -> Vec<WinEntry> {
     entries
 }
 
-/// A section in the panel, macOS-Contexts style: "Pinned" apps first, then
-/// "Full Screen", then one group per workspace holding its tiled windows,
-/// then "Floating". `rows` index into the entries slice passed to `group`.
-/// Display order within a group is most-recently-used.
+/// A section in the panel, macOS-Contexts style: "Pinned" windows first
+/// (individual windows the user pinned by address for quick navigation),
+/// then "Full Screen", then one group per workspace holding its tiled
+/// windows, then "Floating". Pinned *apps* are launcher rows owned by the
+/// panel, not window groups. `rows` index into the entries slice passed
+/// to `group`. Display order within a group is most-recently-used.
 #[derive(Debug, Clone)]
 pub struct Group {
     pub label: String,
     pub rows: Vec<usize>,
 }
 
-pub fn group(entries: &[WinEntry], pinned: &[String]) -> Vec<Group> {
+pub fn group(entries: &[WinEntry], pinned_windows: &[String]) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
-    let is_pinned = |e: &WinEntry| {
-        pinned.iter().any(|p| {
-            crate::apps::class_matches(p, &e.class)
-                || crate::apps::class_matches(p, &e.initial_class)
-        })
-    };
+    let is_pinned = |e: &WinEntry| pinned_windows.iter().any(|a| a == &e.address);
     let pinned_rows: Vec<usize> = (0..entries.len())
         .filter(|&i| is_pinned(&entries[i]))
         .collect();

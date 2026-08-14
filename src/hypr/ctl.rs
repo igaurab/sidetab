@@ -30,6 +30,9 @@ pub fn batch(cmds: &[String]) -> Result<()> {
 #[derive(Deserialize, Debug, Clone)]
 pub struct Client {
     pub address: String,
+    /// top-left position in logical layout coords
+    pub at: [i64; 2],
+    pub size: [i64; 2],
     pub class: String,
     #[serde(rename = "initialClass")]
     pub initial_class: String,
@@ -175,4 +178,11 @@ pub fn focus_window(address: &str) -> Result<()> {
 
 pub fn focus_current_or_last() -> Result<()> {
     dispatch_no_warp("focuscurrentorlast")
+}
+
+/// Raise a window to the top of the stack. Hyprland marks raised windows
+/// as allowed-over-fullscreen, so this is how both the panel and switch
+/// targets stay visible above a fullscreen window.
+pub fn raise_window(address: &str) -> Result<()> {
+    dispatch(&format!("alterzorder top,address:{address}"))
 }

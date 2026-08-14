@@ -28,7 +28,7 @@ const SECTIONS: [(Section, &str, &str); 5] = [
     (Section::Panel, "icons/panel.svg", "Panel"),
     (Section::Shortcuts, "icons/keys.svg", "Switching"),
     (Section::Appearance, "icons/appearance.svg", "Appearance"),
-    (Section::PinnedApps, "icons/pin.svg", "Pinned Apps"),
+    (Section::PinnedApps, "icons/pin.svg", "Apps"),
     (Section::About, "icons/info.svg", "About"),
 ];
 
@@ -118,12 +118,19 @@ impl Settings {
                 // snap to 10px steps within [WIDTH_MIN, WIDTH_MAX]
                 let w = WIDTH_MIN + (WIDTH_MAX - WIDTH_MIN) * frac;
                 self.cfg.width = (w / 10.0).round() * 10.0;
+                // light path: only the content card re-renders per event
+                let w = self.cfg.width;
+                self.panel.update(cx, |panel, cx| panel.preview_width(w, cx));
+                cx.notify();
+                return;
             }
             None => return,
         }
-        self.apply_live(cx);
-        // show the real panel at the new spot while dragging
-        self.panel.update(cx, |panel, cx| panel.preview_reveal(cx));
+        // light path: move the revealed panel without park/reveal churn
+        let cfg = self.cfg.clone();
+        self.panel
+            .update(cx, |panel, cx| panel.preview_position(cfg, cx));
+        cx.notify();
     }
 
     fn drag_end(&mut self, cx: &mut Context<Self>) {
@@ -762,7 +769,7 @@ impl Settings {
             .flex_col()
             .flex_1()
             .min_h(px(0.))
-            .child(self.heading("Pinned Apps", u))
+            .child(self.heading("Apps", u))
             .child(
                 div()
                     .pb(px(10.))
@@ -770,9 +777,10 @@ impl Settings {
                     .text_size(px(11.))
                     .text_color(rgba(u.dim))
                     .child(
-                        "Pin the apps you use most. Like the macOS dock, they get \
-                         their own section at the top of the panel — click one there \
-                         to open it even when it isn't running.",
+                        "Apps you pin here are launchers shown below the panel's \
+                         window list — every click opens the app (a new instance if \
+                         it allows one). To pin a specific open window to the top of \
+                         the panel instead, right-click its row and choose Pin Window.",
                     ),
             );
 

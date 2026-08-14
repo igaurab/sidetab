@@ -40,12 +40,25 @@ pub enum Scope {
     Workspace,
 }
 
-/// A pinned app with no open window, shown as a dock-style launch row.
+/// A pinned app, shown as a dock-style launcher row below the window list.
+/// Every click launches it (a new instance if the app allows one; a
+/// single-instance app will just surface its existing window itself).
 #[derive(Debug, Clone)]
 struct Launcher {
     class: String,
     name: String,
     exec: Option<String>,
+    running: bool,
+}
+
+/// Right-click context menu on a row. On a window row (`address` set) it
+/// offers pinning that window and pinning its app; on a launcher row only
+/// unpinning the app.
+#[derive(Debug, Clone)]
+struct RowMenu {
+    class: String,
+    address: Option<String>,
+    position: gpui::Point<gpui::Pixels>,
 }
 
 pub struct Switcher {
@@ -55,8 +68,13 @@ pub struct Switcher {
     groups: Vec<Group>,
     /// installed-app index, for resolving pinned classes to name/exec
     apps: Vec<crate::apps::DesktopApp>,
-    /// pinned apps that currently have no window (grouped view only)
+    /// dock rows for every pinned app (grouped view only)
     launchers: Vec<Launcher>,
+    /// window addresses pinned to the top "Pinned" group (session-only:
+    /// addresses die with their windows, so persisting them is pointless)
+    pinned_windows: Vec<String>,
+    /// open right-click menu, if any
+    menu: Option<RowMenu>,
     /// entry indices in on-screen order (group by group)
     order: Vec<usize>,
     /// entry indices when a search query is active
@@ -68,6 +86,11 @@ pub struct Switcher {
     scope: Scope,
     /// our own Hyprland window address (discovered after mapping)
     address: Option<String>,
+    /// live width-drag: window sits at WIDTH_MAX, card renders this wide
+    width_preview: Option<f32>,
+    /// windows we floated to lift them above a fullscreen sibling, with
+    /// their original tiled geometry; re-tiled in place when coverage ends
+    temp_floated: Vec<(String, Option<([i64; 2], [i64; 2])>)>,
     fullscreen_active: bool,
     dirty: bool,
     /// the current reveal came from edge hover (auto-hides on leave)
@@ -106,6 +129,8 @@ impl Switcher {
             groups: Vec::new(),
             apps: crate::apps::installed(),
             launchers: Vec::new(),
+            pinned_windows: Vec::new(),
+            menu: None,
             order: Vec::new(),
             filtered: Vec::new(),
             query: String::new(),
@@ -113,6 +138,8 @@ impl Switcher {
             mode: Mode::Hidden,
             scope: Scope::All,
             address: None,
+            width_preview: None,
+            temp_floated: Vec::new(),
             fullscreen_active: ctl::active_window_fullscreen(),
             dirty: true,
             hover_originated: false,
@@ -148,13 +175,17 @@ impl Switcher {
 
     fn refresh(&mut self) {
         self.entries = windows::fetch();
+        // drop pins whose window closed (checked against ALL windows,
+        // before any workspace filtering, so other-workspace pins survive)
+        self.pinned_windows
+            .retain(|a| self.entries.iter().any(|e| &e.address == a));
         if self.scope == Scope::Workspace {
             if let Ok(mon) = ctl::focused_monitor() {
                 self.entries
                     .retain(|e| e.workspace_id == mon.active_workspace.id);
             }
         }
-        self.groups = windows::group(&self.entries, &self.cfg.pinned);
+        self.groups = windows::group(&self.entries, &self.pinned_windows);
         self.order = windows::display_order(&self.groups);
         let has_window = |pin: &str| {
             self.entries.iter().any(|e| {
@@ -166,7 +197,6 @@ impl Switcher {
             .cfg
             .pinned
             .iter()
-            .filter(|pin| !has_window(pin))
             .map(|pin| {
                 let app = self
                     .apps
@@ -178,6 +208,7 @@ impl Switcher {
                         .map(|a| a.name.clone())
                         .unwrap_or_else(|| windows::app_name(pin)),
                     exec: app.map(|a| a.exec.clone()),
+                    running: has_window(pin),
                 }
             })
             .collect();
@@ -244,10 +275,7 @@ impl Switcher {
                 h += GROUP_HEADER_H + g.rows.len() as f32 * ROW_H;
             }
             if self.show_launchers() {
-                if !self.has_pinned_group() {
-                    h += GROUP_HEADER_H;
-                }
-                h += self.launchers.len() as f32 * ROW_H;
+                h += GROUP_HEADER_H + self.launchers.len() as f32 * ROW_H;
             }
             if self.groups.is_empty() && !self.show_launchers() {
                 h += ROW_H;
@@ -256,14 +284,54 @@ impl Switcher {
         h
     }
 
-    /// Dock rows for not-running pinned apps appear in the docked grouped
-    /// view, not in the centered cycling overlay or search results.
+    /// The pinned dock appears in the docked grouped view, not in the
+    /// centered cycling overlay or search results.
     fn show_launchers(&self) -> bool {
         !self.launchers.is_empty() && !self.centered() && !self.searching()
     }
 
-    fn has_pinned_group(&self) -> bool {
-        self.groups.first().is_some_and(|g| g.label == "Pinned")
+    /// Pin the app if it isn't pinned, unpin it if it is; persists.
+    fn toggle_pin(&mut self, class: &str, cx: &mut Context<Self>) {
+        let before = self.cfg.pinned.len();
+        self.cfg
+            .pinned
+            .retain(|p| !crate::apps::class_matches(p, class));
+        if self.cfg.pinned.len() == before {
+            self.cfg.pinned.push(class.to_string());
+        }
+        let _ = self.cfg.save();
+        self.menu = None;
+        self.refresh();
+        if self.mode != Mode::Hidden {
+            self.place(true); // the dock changed the panel height
+        }
+        cx.notify();
+    }
+
+    fn is_pinned(&self, class: &str) -> bool {
+        self.cfg
+            .pinned
+            .iter()
+            .any(|p| crate::apps::class_matches(p, class))
+    }
+
+    /// Pin/unpin a single window (by address) to the top "Pinned" group.
+    fn toggle_pin_window(&mut self, address: &str, cx: &mut Context<Self>) {
+        let before = self.pinned_windows.len();
+        self.pinned_windows.retain(|a| a != address);
+        if self.pinned_windows.len() == before {
+            self.pinned_windows.push(address.to_string());
+        }
+        self.menu = None;
+        self.refresh();
+        if self.mode != Mode::Hidden {
+            self.place(true);
+        }
+        cx.notify();
+    }
+
+    fn is_pinned_window(&self, address: &str) -> bool {
+        self.pinned_windows.iter().any(|a| a == address)
     }
 
     /// True while a cycling session should present as a centered overlay
@@ -276,7 +344,13 @@ impl Switcher {
     /// Height always fits the full content (clamped only by the monitor).
     fn geometry(&self, mon: &ctl::Monitor) -> (i64, i64, i64, i64, i64) {
         let (mw, mh) = mon.logical_size();
-        let w = self.cfg.width as f64;
+        // during a width drag the real window parks at WIDTH_MAX once and
+        // only the content card resizes — per-event window resizes flicker
+        let w = if self.width_preview.is_some() {
+            crate::config::WIDTH_MAX as f64
+        } else {
+            self.cfg.width as f64
+        };
         let h = (self.content_height() as f64 + 4.0).min(mh - 16.0);
         // Park entirely offscreen — hover detection is cursor-polling based,
         // so no visible sliver is needed (hover_strip_px is only the width
@@ -327,13 +401,24 @@ impl Switcher {
         }
         self.palette = self.cfg.theme.palette();
         self.place(true);
-        // visible panels must receive pointer input (hover + clicks),
-        // which Hyprland withholds from no_focus windows
-        self.set_nofocus(false);
+        // raising marks the panel allowed-over-fullscreen, so it shows
+        // above fullscreen windows too
+        if self.fullscreen_active {
+            if let Some(addr) = &self.address {
+                let _ = ctl::raise_window(addr);
+            }
+        }
+        // Visible panels normally drop no_focus so they receive pointer
+        // input (hover + clicks). Over a fullscreen window the tag must
+        // stay: follow_mouse would focus the panel and Hyprland transfers
+        // fullscreen to newly focused windows — the panel would go
+        // fullscreen. View-only there; keyboard switching still works.
+        self.set_nofocus(self.fullscreen_active);
         cx.notify();
     }
 
     fn end_interaction(&mut self) {
+        self.menu = None;
         self.scope = Scope::All;
         self.hover_originated = false;
         self.outside_polls = 0;
@@ -377,9 +462,6 @@ impl Switcher {
         }
         match self.mode {
             Mode::Hidden | Mode::HoverPending => {
-                if self.fullscreen_active {
-                    return;
-                }
                 let (Some((cur_x, cur_y)), Some(mon)) = (ctl::cursor_pos(), self.monitor())
                 else {
                     return;
@@ -485,9 +567,66 @@ impl Switcher {
         .detach();
     }
 
+    /// Focus a window. If a fullscreen sibling on its workspace would keep
+    /// covering it, temporarily float it on top instead — floating BEFORE
+    /// focusing avoids Hyprland transferring fullscreen to the new focus.
+    /// Temp-floated windows are re-tiled when returning to the fullscreen
+    /// window (or when fullscreen ends).
+    fn switch_to_address(&mut self, address: &str) {
+        let Some(t) = self.entries.iter().find(|e| e.address == address).cloned() else {
+            let _ = ctl::focus_window(address);
+            return;
+        };
+        let covered = !t.fullscreen
+            && self.entries.iter().any(|e| {
+                e.fullscreen && e.workspace_id == t.workspace_id && e.address != t.address
+            });
+        if covered {
+            if !t.floating {
+                // remember the tiled geometry so the layout can be restored
+                let orig = ctl::clients().ok().and_then(|cs| {
+                    cs.into_iter()
+                        .find(|c| c.address == address)
+                        .map(|c| (c.at, c.size))
+                });
+                let _ = ctl::dispatch(&format!("setfloating address:{address}"));
+                self.temp_floated.push((address.to_string(), orig));
+            }
+            let _ = ctl::focus_window(address);
+            let _ = ctl::raise_window(address);
+        } else {
+            self.restore_temp_floated();
+            let _ = ctl::focus_window(address);
+        }
+    }
+
+    /// Re-tile windows we floated to lift them over a fullscreen sibling.
+    /// Each is first moved back to its original tiled spot so the layout
+    /// re-inserts it where it came from.
+    fn restore_temp_floated(&mut self) {
+        for (addr, orig) in std::mem::take(&mut self.temp_floated) {
+            if !self.entries.iter().any(|e| e.address == addr) {
+                continue; // window closed meanwhile
+            }
+            let mut cmds = Vec::new();
+            if let Some((at, size)) = orig {
+                cmds.push(format!(
+                    "dispatch resizewindowpixel exact {} {},address:{addr}",
+                    size[0], size[1]
+                ));
+                cmds.push(format!(
+                    "dispatch movewindowpixel exact {} {},address:{addr}",
+                    at[0], at[1]
+                ));
+            }
+            cmds.push(format!("dispatch settiled address:{addr}"));
+            let _ = ctl::batch(&cmds);
+        }
+    }
+
     fn focus_selected_and_hide(&mut self, cx: &mut Context<Self>) {
-        if let Some(entry) = self.selected_entry() {
-            let _ = ctl::focus_window(&entry.address);
+        if let Some(address) = self.selected_entry().map(|e| e.address.clone()) {
+            self.switch_to_address(&address);
         }
         self.rest(cx);
     }
@@ -637,6 +776,10 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
             }
             HyprEvent::FullscreenChanged(active) => {
                 self.fullscreen_active = active;
+                if !active {
+                    // fullscreen ended: put temporarily floated windows back
+                    self.restore_temp_floated();
+                }
                 if self.mode == Mode::Hidden {
                     self.park();
                 }
@@ -718,7 +861,7 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
     fn on_hover_change(&mut self, hovered: bool, cx: &mut Context<Self>) {
         if hovered {
             self.hide_gen += 1; // cancel pending hides
-            if self.mode == Mode::Hidden && !self.fullscreen_active && self.hover_armed {
+            if self.mode == Mode::Hidden && self.hover_armed {
                 self.mode = Mode::HoverPending;
                 self.schedule_reveal(self.cfg.show_delay_ms, cx);
             }
@@ -748,9 +891,38 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
         self.reveal_now(cx);
     }
 
+    /// Live width-drag preview. The window is placed once at WIDTH_MAX;
+    /// each event only re-renders the content card at the new width —
+    /// resizing the real window per mouse move makes the client buffer
+    /// race the compositor and flicker.
+    pub fn preview_width(&mut self, w: f32, cx: &mut Context<Self>) {
+        self.cfg.width = w;
+        let first = self.width_preview.is_none();
+        self.width_preview = Some(w);
+        if first {
+            self.preview_reveal(cx);
+        }
+        cx.notify();
+    }
+
+    /// Live position-drag preview: moves the already-revealed window
+    /// without the full config-update park/reveal churn.
+    pub fn preview_position(&mut self, cfg: Config, cx: &mut Context<Self>) {
+        self.cfg = cfg;
+        if matches!(self.mode, Mode::Hidden | Mode::HoverPending) {
+            self.preview_reveal(cx);
+        } else {
+            self.place(true);
+        }
+        cx.notify();
+    }
+
     pub fn preview_end(&mut self, cx: &mut Context<Self>) {
+        self.width_preview = None;
         if self.mode == Mode::Revealed {
             self.rest(cx);
+        } else {
+            cx.notify();
         }
     }
 
@@ -808,6 +980,8 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
         };
         let icon = self.icons.resolve(&entry.class, &entry.initial_class);
         let address = entry.address.clone();
+        let menu_class = entry.class.clone();
+        let menu_address = entry.address.clone();
         let show_digit = position < 9 && !self.searching();
 
         div()
@@ -856,8 +1030,19 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
-                    let _ = ctl::focus_window(&address);
+                    this.switch_to_address(&address);
                     this.rest(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    this.menu = Some(RowMenu {
+                        class: menu_class.clone(),
+                        address: Some(menu_address.clone()),
+                        position: ev.position,
+                    });
+                    cx.notify();
                 }),
             )
     }
@@ -876,13 +1061,17 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
             .child(label)
     }
 
-    /// A pinned app with no window: dimmed row that launches it on click.
+    /// A pinned app's dock row: every click launches the app (the app
+    /// itself decides whether that means a new instance or surfacing the
+    /// existing one). The accent dot marks apps with an open window.
     fn render_launcher_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let l = &self.launchers[ix];
         let p = self.palette;
         let icon = self.icons.resolve(&l.class, "");
         let class = l.class.clone();
+        let menu_class = l.class.clone();
         let exec = l.exec.clone();
+        let running = l.running;
         div()
             .id(("launch", ix))
             .h(px(ROW_H))
@@ -904,16 +1093,44 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_color(rgba(p.dim_text))
+                    .text_color(rgba(if running { p.text } else { p.dim_text }))
                     .child(l.name.clone()),
             )
+            .when(running, |d| {
+                d.child(
+                    div()
+                        .w(px(5.))
+                        .h(px(5.))
+                        .flex_none()
+                        .rounded(px(2.5))
+                        .bg(rgba(p.accent)),
+                )
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     if let Some(exec) = &exec {
                         let _ = ctl::dispatch(&format!("exec {exec}"));
+                    } else if let Some(entry) = this.entries.iter().find(|e| {
+                        crate::apps::class_matches(&class, &e.class)
+                            || crate::apps::class_matches(&class, &e.initial_class)
+                    }) {
+                        // no desktop entry to launch from; at least focus
+                        // the MRU window (entries are MRU-ordered)
+                        let _ = ctl::focus_window(&entry.address);
                     }
                     this.rest(cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    this.menu = Some(RowMenu {
+                        class: menu_class.clone(),
+                        address: None,
+                        position: ev.position,
+                    });
+                    cx.notify();
                 }),
             )
     }
@@ -956,33 +1173,99 @@ impl Render for Switcher {
                     .child("No windows"),
             );
         } else {
-            // pinned apps with no window sit under the Pinned header,
-            // after any running pinned windows (dock-style launchers)
-            if self.show_launchers() && !self.has_pinned_group() {
-                list = list.child(self.group_header("Pinned".to_string()));
-                for ix in 0..self.launchers.len() {
-                    list = list.child(self.render_launcher_row(ix, cx));
-                }
-            }
             let groups = self.groups.clone();
             let mut pos = 0;
             for g in groups {
-                let is_pinned_group = g.label == "Pinned";
                 list = list.child(self.group_header(g.label.clone()));
                 for entry_ix in g.rows {
                     list = list.child(self.render_row(pos, entry_ix, cx));
                     pos += 1;
                 }
-                if is_pinned_group && self.show_launchers() {
-                    for ix in 0..self.launchers.len() {
-                        list = list.child(self.render_launcher_row(ix, cx));
-                    }
+            }
+            // the pinned-apps launcher dock sits below the window list
+            if self.show_launchers() {
+                list = list.child(self.group_header("Pinned Apps".to_string()));
+                for ix in 0..self.launchers.len() {
+                    list = list.child(self.render_launcher_row(ix, cx));
                 }
             }
         }
 
+        // right-click menu, floated over the list at the click position
+        let menu_overlay = self.menu.clone().map(|m| {
+            let menu_item = |id: &'static str,
+                             label: &'static str,
+                             on_click: Box<dyn Fn(&mut Self, &mut Context<Self>)>,
+                             cx: &mut Context<Self>| {
+                div()
+                    .id(id)
+                    .h(px(24.))
+                    .px(px(8.))
+                    .rounded(px(5.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgba(p.accent)).text_color(rgba(p.accent_text)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| on_click(this, cx)),
+                    )
+                    .child(label)
+            };
+
+            let item_count = if m.address.is_some() { 2 } else { 1 };
+            let menu_h = 8.0 + item_count as f32 * 24.0;
+            let x = f32::from(m.position.x).clamp(0.0, self.cfg.width - 150.0);
+            let y = f32::from(m.position.y)
+                .min(self.content_height() - menu_h - 8.0)
+                .max(0.0);
+            let mut menu = div()
+                .id("rowmenu")
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(140.))
+                .p(px(4.))
+                .rounded(px(8.))
+                .bg(rgba((p.background & 0xffffff00) | 0xff))
+                .border_1()
+                .border_color(rgba(p.border))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    cx.notify();
+                }));
+
+            if let Some(address) = m.address.clone() {
+                let label = if self.is_pinned_window(&address) {
+                    "Unpin Window"
+                } else {
+                    "Pin Window"
+                };
+                menu = menu.child(menu_item(
+                    "rowmenu-pin-window",
+                    label,
+                    Box::new(move |this, cx| this.toggle_pin_window(&address, cx)),
+                    cx,
+                ));
+            }
+            let app_label = if self.is_pinned(&m.class) {
+                "Unpin App"
+            } else {
+                "Pin App"
+            };
+            let class = m.class.clone();
+            menu.child(menu_item(
+                "rowmenu-pin-app",
+                app_label,
+                Box::new(move |this, cx| this.toggle_pin(&class, cx)),
+                cx,
+            ))
+        });
+
         let card = div()
             .id("root")
+            .relative()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 this.on_key(ev, window, cx)
@@ -1050,7 +1333,18 @@ impl Render for Switcher {
                         )
                     }),
             )
-            .child(list);
-        card.w_full()
+            .child(list)
+            .children(menu_overlay);
+        // during a width drag the card renders at the dragged width inside
+        // the max-width window, anchored to the docked edge
+        match self.width_preview {
+            Some(w) => div()
+                .size_full()
+                .flex()
+                .when(!left, |d| d.justify_end())
+                .child(card.w(px(w)))
+                .into_any_element(),
+            None => card.w_full().into_any_element(),
+        }
     }
 }

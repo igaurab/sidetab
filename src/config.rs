@@ -177,6 +177,10 @@ impl Default for Config {
     }
 }
 
+/// Panel width bounds (shared by the settings slider and live preview).
+pub const WIDTH_MIN: f32 = 240.0;
+pub const WIDTH_MAX: f32 = 640.0;
+
 pub fn config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
