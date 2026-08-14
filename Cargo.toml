@@ -1,6 +1,6 @@
 [package]
 name = "sidetab"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A Contexts-style window switcher sidebar for Hyprland — fast Alt-Tab panel with fuzzy search and hover reveal"
 license = "MIT"
@@ -23,5 +23,21 @@ dirs = "6"
 futures = "0.3"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 strip = true
+
+# Full debuginfo on a GPUI binary costs ~500MB of output and dominates link
+# time on every edit. Line tables are enough for backtraces.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+# Release-speed binary without the slow parts of the release profile, for
+# checking real-world performance: cargo build --profile quick
+[profile.quick]
+inherits = "release"
+lto = false
+strip = false
+debug = "line-tables-only"

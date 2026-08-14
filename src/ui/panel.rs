@@ -97,6 +97,10 @@ pub struct Switcher {
     hover_originated: bool,
     /// consecutive polls with the cursor outside the revealed panel
     outside_polls: u8,
+    /// polls left in which hover auto-hide is suppressed. Closing a window
+    /// shrinks the panel out from under the cursor, which would otherwise
+    /// read as "cursor left" and hide the panel mid-cleanup.
+    hold_polls: u8,
     /// hover reveal is suppressed until the cursor has left the trigger
     /// zone once (prevents instant re-expansion right after switching)
     hover_armed: bool,
@@ -144,6 +148,7 @@ impl Switcher {
             dirty: true,
             hover_originated: false,
             outside_polls: 0,
+            hold_polls: 0,
             hover_armed: true,
             reveal_gen: 0,
             hide_gen: 0,
@@ -483,18 +488,37 @@ impl Switcher {
                 }
             }
             Mode::Revealed if self.hover_originated => {
-                if self.cursor_inside_panel() {
+                if self.hold_polls > 0 {
+                    // a just-closed window shrank the panel out from under
+                    // the cursor — stay put so the next one is one click away
+                    self.hold_polls -= 1;
+                    self.outside_polls = 0;
+                } else if self.cursor_inside_panel() {
                     self.outside_polls = 0;
                 } else {
                     self.outside_polls = self.outside_polls.saturating_add(1);
                     let outside_ms = self.outside_polls as u64 * 180;
-                    if outside_ms >= self.cfg.hide_delay_ms.max(200) {
+                    // an open context menu means the user is mid-interaction:
+                    // wait much longer, but still hide if they walked away
+                    let base = self.cfg.hide_delay_ms.max(200);
+                    let limit = if self.menu.is_some() { base * 6 } else { base };
+                    if outside_ms >= limit {
                         self.hide_now(cx);
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    /// Keep a hover-revealed panel open for a beat, regardless of where the
+    /// cursor ended up. Used after actions that resize the panel under the
+    /// cursor, so a run of them (closing several windows) isn't interrupted.
+    fn hold_open(&mut self) {
+        // poll_edge ticks every 180ms
+        self.hold_polls = 10;
+        self.outside_polls = 0;
+        self.hide_gen += 1; // cancel any pending scheduled hide
     }
 
     /// True if the cursor is currently inside the revealed panel rect.
@@ -547,7 +571,7 @@ impl Switcher {
                 {
                     // spurious leave events fire when the window moves under
                     // a stationary cursor; only hide if the cursor truly left
-                    if this.cursor_inside_panel() {
+                    if this.hold_polls > 0 || this.cursor_inside_panel() {
                         this.schedule_hide(this.cfg.hide_delay_ms.max(150), cx);
                     } else {
                         this.hide_now(cx);
@@ -1240,6 +1264,9 @@ impl Render for Switcher {
                         Box::new(move |this, cx| {
                             let _ = ctl::dispatch(&format!("closewindow address:{address}"));
                             this.menu = None;
+                            // closing shrinks the panel; hold it open so the
+                            // next window can be closed right away
+                            this.hold_open();
                             cx.notify();
                         }),
                         cx,
