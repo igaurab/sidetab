@@ -55,8 +55,12 @@ pub struct Group {
 
 pub fn group(entries: &[WinEntry], pinned: &[String]) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
-    let is_pinned =
-        |e: &WinEntry| pinned.iter().any(|p| p == &e.class || p == &e.initial_class);
+    let is_pinned = |e: &WinEntry| {
+        pinned.iter().any(|p| {
+            crate::apps::class_matches(p, &e.class)
+                || crate::apps::class_matches(p, &e.initial_class)
+        })
+    };
     let pinned_rows: Vec<usize> = (0..entries.len())
         .filter(|&i| is_pinned(&entries[i]))
         .collect();

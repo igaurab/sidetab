@@ -40,22 +40,7 @@ pub struct IconResolver {
     memo: Mutex<HashMap<String, Option<PathBuf>>>,
 }
 
-fn data_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(home_data) = dirs::data_dir() {
-        dirs.push(home_data);
-    }
-    if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".local/share/flatpak/exports/share"));
-    }
-    dirs.push(PathBuf::from("/var/lib/flatpak/exports/share"));
-    let xdg = std::env::var("XDG_DATA_DIRS")
-        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
-    for d in xdg.split(':').filter(|d| !d.is_empty()) {
-        dirs.push(PathBuf::from(d));
-    }
-    dirs
-}
+use crate::apps::data_dirs;
 
 fn parse_desktop_entry(path: &Path) -> Option<(Option<String>, Option<String>)> {
     let content = std::fs::read_to_string(path).ok()?;
@@ -213,6 +198,19 @@ impl IconResolver {
             }
             _ => None,
         }
+    }
+
+    /// PNG path for a raw Icon= name from a .desktop entry.
+    pub fn resolve_name(&self, name: &str) -> Option<PathBuf> {
+        let key = format!("icon:{name}");
+        if let Some(hit) = self.memo.lock().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let result = self
+            .lookup_in_themes(name)
+            .and_then(|p| self.to_png(p, name));
+        self.memo.lock().unwrap().insert(key, result.clone());
+        result
     }
 
     /// PNG path for a window's app icon, or None (caller draws a letter tile).

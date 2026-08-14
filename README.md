@@ -20,9 +20,10 @@ and hover-reveal at the screen edge. Built in Rust with
   switch, digits 1–9 to jump.
 - **Hover reveal**: the sidebar stays hidden until your cursor touches the
   screen edge, then slides in; it never steals your keyboard focus.
-- **Configurable shortcuts**: choose what Alt+Tab and Super+Tab each cycle
-  through (all workspaces, current workspace, or disabled) from settings —
-  no Hyprland config edits needed to swap behaviors.
+- **Configurable switching**: choose what Alt+Tab and Super+Tab each cycle
+  through (all workspaces or current workspace) from settings — no Hyprland
+  config edits needed. Disabling a shortcut restores the stock behavior
+  (plain Hyprland window cycling / next-workspace switching).
 - **Mouse friendly**: hover to highlight, click to switch.
 - **Light/dark themes**, following your system preference by default.
 - **Settings GUI** (`sidetab settings`), laid out like the Contexts

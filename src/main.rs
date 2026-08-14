@@ -1,3 +1,4 @@
+mod apps;
 mod assets;
 mod client;
 mod config;

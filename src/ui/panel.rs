@@ -40,11 +40,23 @@ pub enum Scope {
     Workspace,
 }
 
+/// A pinned app with no open window, shown as a dock-style launch row.
+#[derive(Debug, Clone)]
+struct Launcher {
+    class: String,
+    name: String,
+    exec: Option<String>,
+}
+
 pub struct Switcher {
     cfg: Config,
     palette: Palette,
     entries: Vec<WinEntry>,
     groups: Vec<Group>,
+    /// installed-app index, for resolving pinned classes to name/exec
+    apps: Vec<crate::apps::DesktopApp>,
+    /// pinned apps that currently have no window (grouped view only)
+    launchers: Vec<Launcher>,
     /// entry indices in on-screen order (group by group)
     order: Vec<usize>,
     /// entry indices when a search query is active
@@ -92,6 +104,8 @@ impl Switcher {
             palette,
             entries: Vec::new(),
             groups: Vec::new(),
+            apps: crate::apps::installed(),
+            launchers: Vec::new(),
             order: Vec::new(),
             filtered: Vec::new(),
             query: String::new(),
@@ -142,6 +156,31 @@ impl Switcher {
         }
         self.groups = windows::group(&self.entries, &self.cfg.pinned);
         self.order = windows::display_order(&self.groups);
+        let has_window = |pin: &str| {
+            self.entries.iter().any(|e| {
+                crate::apps::class_matches(pin, &e.class)
+                    || crate::apps::class_matches(pin, &e.initial_class)
+            })
+        };
+        self.launchers = self
+            .cfg
+            .pinned
+            .iter()
+            .filter(|pin| !has_window(pin))
+            .map(|pin| {
+                let app = self
+                    .apps
+                    .iter()
+                    .find(|a| crate::apps::class_matches(pin, &a.class));
+                Launcher {
+                    class: pin.clone(),
+                    name: app
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| windows::app_name(pin)),
+                    exec: app.map(|a| a.exec.clone()),
+                }
+            })
+            .collect();
         self.dirty = false;
         if !self.query.is_empty() {
             self.filtered = windows::filter(&self.entries, &self.query);
@@ -470,7 +509,27 @@ impl Switcher {
                 let scope = match behavior {
                     CycleScope::AllWorkspaces => Scope::All,
                     CycleScope::CurrentWorkspace => Scope::Workspace,
-                    CycleScope::Disabled => return,
+                    CycleScope::Disabled => {
+                        // hand the key back to the compositor's stock
+                        // behavior: plain window cycling for Alt+Tab,
+                        // workspace switching for Super+Tab (the Omarchy
+                        // defaults these binds replaced)
+                        if cmd.ends_with("-ws") {
+                            let _ = ctl::dispatch(if delta > 0 {
+                                "workspace e+1"
+                            } else {
+                                "workspace e-1"
+                            });
+                        } else {
+                            let _ = ctl::dispatch(if delta > 0 {
+                                "cyclenext"
+                            } else {
+                                "cyclenext prev"
+                            });
+                            let _ = ctl::dispatch("bringactivetotop");
+                        }
+                        return;
+                    }
                 };
                 if self.mode == Mode::Search
                     || (self.mode == Mode::Cycling && self.scope == scope)

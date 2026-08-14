@@ -296,10 +296,10 @@ impl Settings {
             )
             .child(self.scope_chips("supertab", cfg.super_tab, |c, s| c.super_tab = s, u, cx))
             .child(self.hint(
-                "Choose what each shortcut cycles through, or disable it. \
-                 Disabled shortcuts do nothing while sidetab holds the \
-                 binding — remove the bind from your Hyprland config to \
-                 give the key back to something else."
+                "Choose what each shortcut cycles through. Disabled restores \
+                 the stock behavior: Alt+Tab cycles windows the plain \
+                 Hyprland way (no panel), Super+Tab switches to the next \
+                 workspace."
                     .to_string(),
                 u,
             ))
