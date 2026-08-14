@@ -99,11 +99,13 @@ pub struct ActiveWindow {
     pub fullscreen: i64,
 }
 
+/// True only for real fullscreen (bit 2). Bit 1 is "maximized", which does
+/// not cover pinned floating windows, so the hover strip must stay usable.
 pub fn active_window_fullscreen() -> bool {
     request("j/activewindow")
         .ok()
         .and_then(|raw| serde_json::from_str::<ActiveWindow>(&raw).ok())
-        .map(|w| w.fullscreen != 0)
+        .map(|w| w.fullscreen & 2 != 0)
         .unwrap_or(false)
 }
 
@@ -122,7 +124,7 @@ pub fn apply_panel_rules() -> Result<()> {
         // (tagwindow +/- sidetab-nofocus); a class rule could never be lifted.
         "no_focus on, match:tag sidetab-nofocus",
         "float on, match:class sidetab-settings",
-        "size 440 560, match:class sidetab-settings",
+        "size 440 660, match:class sidetab-settings",
         "center on, match:class sidetab-settings",
     ];
     batch(

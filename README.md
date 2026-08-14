@@ -7,14 +7,17 @@ and hover-reveal at the screen edge. Built in Rust with
 
 ## Features
 
-- **True Alt-Tab**: hold Alt, tap Tab to cycle, release Alt to switch.
-  A quick Alt-Tab tap switches to the previous window instantly without
-  flashing the panel.
-- **Grouped like macOS**: sections for Full Screen, each workspace (tiled
-  windows), and Floating windows. Most-recently-used order within groups.
+- **True Alt-Tab**: hold Alt, tap Tab to cycle through all windows in a
+  centered overlay, release Alt to switch. A quick Alt-Tab tap switches to
+  the previous window instantly without flashing the panel.
+- **Super+Tab** cycles only the current workspace's windows, same mechanics.
+- **Grouped like macOS**: sections for Pinned apps, Full Screen, each
+  workspace (tiled windows), and Floating windows. Most-recently-used order
+  within groups. The panel always sizes itself to show every window — no
+  scrolling.
 - **App icons** resolved from your icon theme (SVG icons rasterized and cached).
-- **Fuzzy search** (Super+Tab): type to filter windows, Enter to switch,
-  digits 1–9 to jump.
+- **Fuzzy search** (`sidetab search`): type to filter windows, Enter to
+  switch, digits 1–9 to jump.
 - **Hover reveal**: an invisible strip at the screen edge; hover to peek at
   your windows without touching the keyboard. Never steals focus.
 - **Mouse friendly**: hover to highlight, click to switch.
@@ -43,15 +46,19 @@ sidetab applies its own window rules at runtime — you only add bindings and
 autostart. In `~/.config/hypr/bindings.conf` (or your main config):
 
 ```conf
-# Replace Alt-Tab with sidetab
+# Replace Alt-Tab with sidetab (all workspaces, centered overlay)
 unbind = ALT, TAB
 unbind = ALT SHIFT, TAB
 binde = ALT, TAB, exec, sidetab next
 binde = ALT SHIFT, TAB, exec, sidetab prev
 bindrt = ALT, ALT_L, exec, sidetab commit   # switch on Alt release
 
-# Window search on Super+Tab
-bindd = SUPER, TAB, Window search, exec, sidetab search
+# Super+Tab cycles the current workspace only
+binde = SUPER, TAB, exec, sidetab next-ws
+bindrt = SUPER, SUPER_L, exec, sidetab commit
+
+# Optional: fuzzy window search
+# bindd = SUPER, SLASH, Window search, exec, sidetab search
 ```
 
 And in your autostart:
@@ -65,8 +72,9 @@ exec-once = sidetab daemon
 | Command | Effect |
 |---|---|
 | `sidetab daemon` | run the panel daemon (also the default with no args) |
-| `sidetab next` / `prev` | cycle selection (bind with `binde`) |
-| `sidetab commit` | switch to selection (bind with `bindrt` on Alt release) |
+| `sidetab next` / `prev` | cycle selection across all workspaces (bind with `binde`) |
+| `sidetab next-ws` / `prev-ws` | cycle selection within the active workspace |
+| `sidetab commit` | switch to selection (bind with `bindrt` on modifier release) |
 | `sidetab search` | open with keyboard focus + fuzzy filter |
 | `sidetab toggle` / `show` / `hide` | control panel visibility |
 | `sidetab settings` | open the settings window |
@@ -81,12 +89,13 @@ Settings are edited from the GUI (`sidetab settings`) or by hand in
 position = "left-center"   # left-top | left-center | left-bottom
                            # right-top | right-center | right-bottom
 width = 320.0
-max_height_frac = 0.85
 hover_reveal = true
 hover_strip_px = 4.0       # width of the invisible reveal strip
 show_delay_ms = 120
 hide_delay_ms = 300
 # font = "Inter"           # optional UI font override
+pinned = ["Spotify"]       # window classes shown in the Pinned section
+                           # (easier: toggle apps in `sidetab settings`)
 
 [theme]
 variant = "system"         # system | light | dark

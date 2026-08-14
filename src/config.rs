@@ -166,13 +166,14 @@ pub fn parse_hex(s: &str) -> Option<u32> {
 pub struct Config {
     pub position: Position,
     pub width: f32,
-    pub max_height_frac: f32,
     pub hover_reveal: bool,
     pub hover_strip_px: f32,
     pub show_delay_ms: u64,
     pub hide_delay_ms: u64,
     /// UI font family; defaults to Liberation Sans.
     pub font: Option<String>,
+    /// Window classes pinned to the top "Pinned" section of the panel.
+    pub pinned: Vec<String>,
     pub theme: Theme,
 }
 
@@ -181,12 +182,12 @@ impl Default for Config {
         Config {
             position: Position::LeftCenter,
             width: 320.0,
-            max_height_frac: 0.85,
             hover_reveal: true,
             hover_strip_px: 4.0,
             show_delay_ms: 120,
             hide_delay_ms: 300,
             font: None,
+            pinned: Vec::new(),
             theme: Theme::default(),
         }
     }

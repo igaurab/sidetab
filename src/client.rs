@@ -25,7 +25,8 @@ pub fn send(command: &str) -> Result<()> {
 }
 
 pub const COMMANDS: &[&str] = &[
-    "next", "prev", "commit", "toggle", "show", "hide", "search", "settings",
+    "next", "prev", "next-ws", "prev-ws", "commit", "toggle", "show", "hide", "search",
+    "settings",
 ];
 
 pub fn validate(command: &str) -> Result<()> {

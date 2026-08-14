@@ -34,7 +34,8 @@ pub fn fetch() -> Vec<WinEntry> {
             workspace_id: c.workspace.id,
             workspace_name: c.workspace.name,
             focus_history_id: c.focus_history_id,
-            fullscreen: c.fullscreen != 0,
+            // bit 2 = fullscreen; bit 1 alone is only maximized
+            fullscreen: c.fullscreen & 2 != 0,
             floating: c.floating,
         })
         .collect();
@@ -42,20 +43,31 @@ pub fn fetch() -> Vec<WinEntry> {
     entries
 }
 
-/// A section in the panel, macOS-Contexts style: "Full Screen" first, then
-/// one group per workspace holding its tiled windows, then "Floating".
-/// `rows` index into the entries slice passed to `group`. Display order
-/// within a group is most-recently-used.
+/// A section in the panel, macOS-Contexts style: "Pinned" apps first, then
+/// "Full Screen", then one group per workspace holding its tiled windows,
+/// then "Floating". `rows` index into the entries slice passed to `group`.
+/// Display order within a group is most-recently-used.
 #[derive(Debug, Clone)]
 pub struct Group {
     pub label: String,
     pub rows: Vec<usize>,
 }
 
-pub fn group(entries: &[WinEntry]) -> Vec<Group> {
+pub fn group(entries: &[WinEntry], pinned: &[String]) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
+    let is_pinned =
+        |e: &WinEntry| pinned.iter().any(|p| p == &e.class || p == &e.initial_class);
+    let pinned_rows: Vec<usize> = (0..entries.len())
+        .filter(|&i| is_pinned(&entries[i]))
+        .collect();
+    if !pinned_rows.is_empty() {
+        groups.push(Group {
+            label: "Pinned".to_string(),
+            rows: pinned_rows,
+        });
+    }
     let fullscreen: Vec<usize> = (0..entries.len())
-        .filter(|&i| entries[i].fullscreen)
+        .filter(|&i| entries[i].fullscreen && !is_pinned(&entries[i]))
         .collect();
     if !fullscreen.is_empty() {
         groups.push(Group {
@@ -63,7 +75,7 @@ pub fn group(entries: &[WinEntry]) -> Vec<Group> {
             rows: fullscreen,
         });
     }
-    let is_tiled = |e: &WinEntry| !e.fullscreen && !e.floating;
+    let is_tiled = |e: &WinEntry| !e.fullscreen && !e.floating && !is_pinned(e);
     let mut ws_ids: Vec<i64> = entries
         .iter()
         .filter(|e| is_tiled(e))
@@ -82,7 +94,9 @@ pub fn group(entries: &[WinEntry]) -> Vec<Group> {
         groups.push(Group { label, rows });
     }
     let floating: Vec<usize> = (0..entries.len())
-        .filter(|&i| !entries[i].fullscreen && entries[i].floating)
+        .filter(|&i| {
+            !entries[i].fullscreen && entries[i].floating && !is_pinned(&entries[i])
+        })
         .collect();
     if !floating.is_empty() {
         groups.push(Group {

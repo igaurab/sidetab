@@ -8,8 +8,7 @@ use crate::hypr::events::HyprEvent;
 use crate::icons::IconResolver;
 use crate::windows::{self, Group, WinEntry};
 use gpui::{
-    div, img, prelude::*, px, rgba, Context, FocusHandle, KeyDownEvent, MouseButton, ScrollHandle,
-    Window,
+    div, img, prelude::*, px, rgba, Context, FocusHandle, KeyDownEvent, MouseButton, Window,
 };
 use std::time::Duration;
 
@@ -33,6 +32,14 @@ pub enum Mode {
     Search,
 }
 
+/// Which windows a cycling session includes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    All,
+    /// Only the currently active workspace (Super+Tab).
+    Workspace,
+}
+
 pub struct Switcher {
     cfg: Config,
     palette: Palette,
@@ -46,6 +53,7 @@ pub struct Switcher {
     /// position within the current visible order
     selected: usize,
     mode: Mode,
+    scope: Scope,
     /// our own Hyprland window address (discovered after mapping)
     address: Option<String>,
     fullscreen_active: bool,
@@ -54,7 +62,6 @@ pub struct Switcher {
     hide_gen: u64,
     icons: IconResolver,
     pub focus_handle: FocusHandle,
-    scroll: ScrollHandle,
 }
 
 impl Switcher {
@@ -70,6 +77,7 @@ impl Switcher {
             query: String::new(),
             selected: 0,
             mode: Mode::Hidden,
+            scope: Scope::All,
             address: None,
             fullscreen_active: ctl::active_window_fullscreen(),
             dirty: true,
@@ -77,7 +85,6 @@ impl Switcher {
             hide_gen: 0,
             icons: IconResolver::new(),
             focus_handle: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
         }
     }
 
@@ -92,7 +99,13 @@ impl Switcher {
 
     fn refresh(&mut self) {
         self.entries = windows::fetch();
-        self.groups = windows::group(&self.entries);
+        if self.scope == Scope::Workspace {
+            if let Ok(mon) = ctl::focused_monitor() {
+                self.entries
+                    .retain(|e| e.workspace_id == mon.active_workspace.id);
+            }
+        }
+        self.groups = windows::group(&self.entries, &self.cfg.pinned);
         self.order = windows::display_order(&self.groups);
         self.dirty = false;
         if !self.query.is_empty() {
@@ -163,11 +176,18 @@ impl Switcher {
         h
     }
 
+    /// True while a cycling session should present as a centered overlay
+    /// (macOS Cmd-Tab style) instead of the docked sidebar.
+    fn centered(&self) -> bool {
+        self.mode == Mode::Cycling
+    }
+
     /// (revealed_x, hidden_x, y, w, h) in Hyprland logical layout coords.
+    /// Height always fits the full content (clamped only by the monitor).
     fn geometry(&self, mon: &ctl::Monitor) -> (i64, i64, i64, i64, i64) {
         let (mw, mh) = mon.logical_size();
         let w = self.cfg.width as f64;
-        let h = (self.content_height() as f64).min(mh * self.cfg.max_height_frac as f64);
+        let h = (self.content_height() as f64 + 4.0).min(mh - 16.0);
         let strip = if self.cfg.hover_reveal && !self.fullscreen_active {
             self.cfg.hover_strip_px as f64
         } else {
@@ -181,7 +201,17 @@ impl Switcher {
                 mon.x as f64 + mw - strip,
             )
         };
-        let y = mon.y as f64 + (mh - h) * self.cfg.position.v_align() as f64;
+        let (x_shown, y) = if self.centered() {
+            (
+                mon.x as f64 + (mw - w) / 2.0,
+                mon.y as f64 + (mh - h) / 2.0,
+            )
+        } else {
+            (
+                x_shown,
+                mon.y as f64 + (mh - h) * self.cfg.position.v_align() as f64,
+            )
+        };
         (x_shown as i64, x_hidden as i64, y as i64, w as i64, h as i64)
     }
 
@@ -219,6 +249,7 @@ impl Switcher {
             }
         }
         self.mode = Mode::Hidden;
+        self.scope = Scope::All;
         self.query.clear();
         self.filtered.clear();
         self.reveal_gen += 1; // cancel pending reveals
@@ -280,27 +311,7 @@ impl Switcher {
             return;
         }
         self.selected = ((self.selected as i64 + delta).rem_euclid(len as i64)) as usize;
-        self.scroll.scroll_to_item(self.scroll_index(self.selected));
         cx.notify();
-    }
-
-    /// Child index of a display position inside the scroll container
-    /// (group headers occupy child slots too).
-    fn scroll_index(&self, position: usize) -> usize {
-        if self.searching() {
-            return position;
-        }
-        let mut child = 0;
-        let mut seen = 0;
-        for g in &self.groups {
-            child += 1; // header
-            if position < seen + g.rows.len() {
-                return child + (position - seen);
-            }
-            seen += g.rows.len();
-            child += g.rows.len();
-        }
-        child
     }
 
     // ---- external messages ----
@@ -314,11 +325,19 @@ impl Switcher {
 
     fn handle_cmd(&mut self, cmd: &str, window: &mut Window, cx: &mut Context<Self>) {
         match cmd {
-            "next" | "prev" => {
-                let delta: i64 = if cmd == "next" { 1 } else { -1 };
-                if self.mode == Mode::Cycling || self.mode == Mode::Search {
+            "next" | "prev" | "next-ws" | "prev-ws" => {
+                let delta: i64 = if cmd.starts_with("next") { 1 } else { -1 };
+                let scope = if cmd.ends_with("-ws") {
+                    Scope::Workspace
+                } else {
+                    Scope::All
+                };
+                if self.mode == Mode::Search
+                    || (self.mode == Mode::Cycling && self.scope == scope)
+                {
                     self.step(delta, cx);
                 } else {
+                    self.scope = scope;
                     self.refresh();
                     self.mode = Mode::Cycling;
                     self.selected = if delta > 0 {
@@ -342,6 +361,7 @@ impl Switcher {
                 }
             }
             "show" => {
+                self.scope = Scope::All;
                 self.refresh();
                 self.mode = Mode::Revealed;
                 self.selected = self.mru_position();
@@ -349,6 +369,7 @@ impl Switcher {
             }
             "hide" => self.hide_now(cx),
             "search" => {
+                self.scope = Scope::All;
                 self.refresh();
                 self.mode = Mode::Search;
                 self.query.clear();
@@ -484,7 +505,6 @@ impl Switcher {
             windows::filter(&self.entries, &self.query)
         };
         self.selected = 0;
-        self.scroll.scroll_to_item(0);
         cx.notify();
     }
 
@@ -625,14 +645,8 @@ impl Render for Switcher {
         let left = self.cfg.position.is_left();
         let searching = self.searching();
 
-        let mut list = div()
-            .id("list")
-            .flex_1()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .flex()
-            .flex_col()
-            .px(px(8.));
+        // no scrolling: the window is always sized to fit every row
+        let mut list = div().flex_1().flex().flex_col().px(px(8.));
 
         if searching {
             if self.filtered.is_empty() {
@@ -699,8 +713,9 @@ impl Render for Switcher {
             .bg(rgba(p.background))
             .border_1()
             .border_color(rgba(p.border))
-            .when(left, |d| d.rounded_r(px(10.)))
-            .when(!left, |d| d.rounded_l(px(10.)))
+            .when(self.centered(), |d| d.rounded(px(10.)))
+            .when(!self.centered() && left, |d| d.rounded_r(px(10.)))
+            .when(!self.centered() && !left, |d| d.rounded_l(px(10.)))
             .pt(px(PAD_V))
             .pb(px(PAD_V))
             .text_size(px(13.))

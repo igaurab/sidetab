@@ -14,9 +14,11 @@ USAGE:
     sidetab <command>    send a command to the running daemon
 
 COMMANDS:
-    next      select the next window (bind to ALT, TAB with binde)
+    next      select the next window, all workspaces (bind to ALT, TAB with binde)
     prev      select the previous window
-    commit    switch to the selection (bind to ALT release with bindrt)
+    next-ws   like next, but only windows on the active workspace (Super+Tab)
+    prev-ws   like prev, current workspace only
+    commit    switch to the selection (bind to modifier release with bindrt)
     toggle    show or hide the panel
     show      show the panel
     hide      hide the panel

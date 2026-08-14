@@ -8,11 +8,29 @@ use gpui::{div, prelude::*, px, rgba, Context, Entity, MouseButton, Window};
 pub struct Settings {
     cfg: Config,
     panel: Entity<Switcher>,
+    /// distinct app classes of open windows plus already-pinned ones
+    known_apps: Vec<String>,
+}
+
+fn known_apps(cfg: &Config) -> Vec<String> {
+    let mut apps: Vec<String> = crate::windows::fetch()
+        .into_iter()
+        .map(|e| e.class)
+        .chain(cfg.pinned.iter().cloned())
+        .collect();
+    apps.sort();
+    apps.dedup();
+    apps
 }
 
 impl Settings {
     pub fn new(cfg: Config, panel: Entity<Switcher>) -> Self {
-        Settings { cfg, panel }
+        let known_apps = known_apps(&cfg);
+        Settings {
+            cfg,
+            panel,
+            known_apps,
+        }
     }
 
     fn apply(&mut self, cx: &mut Context<Self>) {
@@ -345,6 +363,41 @@ impl Render for Settings {
             ))
             .child(self.section("Appearance", &u))
             .child(div().pt(px(6.)).child(theme_row))
+            .child(self.section("Pinned apps", &u))
+            .child(
+                div()
+                    .pt(px(6.))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .children(self.known_apps.clone().into_iter().enumerate().map(
+                        |(ix, class)| {
+                            let active = cfg.pinned.contains(&class);
+                            let toggled = class.clone();
+                            self.chip(
+                                ("pin", ix),
+                                crate::windows::app_name(&class),
+                                active,
+                                move |this, cx| {
+                                    this.mutate(
+                                        |c| {
+                                            if let Some(pos) =
+                                                c.pinned.iter().position(|p| p == &toggled)
+                                            {
+                                                c.pinned.remove(pos);
+                                            } else {
+                                                c.pinned.push(toggled.clone());
+                                            }
+                                        },
+                                        cx,
+                                    )
+                                },
+                                &u,
+                                cx,
+                            )
+                        },
+                    )),
+            )
             .child(div().flex_1())
             .child(
                 div()
