@@ -20,7 +20,7 @@ and hover-reveal at the screen edge. Built in Rust with
   workspace (tiled windows), and Floating windows. Most-recently-used order
   within groups. The panel always sizes itself to show every window — no
   scrolling.
-- **App icons** resolved from your icon theme (SVG icons rasterized and cached).
+- **App icons** resolved from your icon theme.
 - **Fuzzy search** (`sidetab search`): type to filter windows, Enter to
   switch, digits 1–9 to jump.
 - **Hover reveal**: the sidebar stays hidden until your cursor touches the
