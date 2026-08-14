@@ -88,9 +88,12 @@ pub struct Switcher {
     address: Option<String>,
     /// live width-drag: window sits at WIDTH_MAX, card renders this wide
     width_preview: Option<f32>,
-    /// windows we floated to lift them above a fullscreen sibling, with
-    /// their original tiled geometry; re-tiled in place when coverage ends
-    temp_floated: Vec<(String, Option<([i64; 2], [i64; 2])>)>,
+    /// fullscreen windows we suspended (internal state set to tiled, app
+    /// still believes it is fullscreen) so a covered sibling could be
+    /// used; re-fullscreened when they regain focus. (addr, client state,
+    /// suspend time — the timestamp filters out the stale focus event
+    /// from the suspend sequence itself)
+    suspended: Vec<(String, i64, std::time::Instant)>,
     fullscreen_active: bool,
     dirty: bool,
     /// the current reveal came from edge hover (auto-hides on leave)
@@ -139,7 +142,7 @@ impl Switcher {
             scope: Scope::All,
             address: None,
             width_preview: None,
-            temp_floated: Vec::new(),
+            suspended: Vec::new(),
             fullscreen_active: ctl::active_window_fullscreen(),
             dirty: true,
             hover_originated: false,
@@ -175,12 +178,10 @@ impl Switcher {
 
     fn refresh(&mut self) {
         self.entries = windows::fetch();
-        // safety net: if no fullscreen window exists anymore (e.g. it was
-        // closed, which emits no fullscreen event), restore temp floats
-        if !self.temp_floated.is_empty() && !self.entries.iter().any(|e| e.fullscreen) {
-            self.restore_temp_floated();
-            self.entries = windows::fetch();
-        }
+        // drop suspensions whose window closed or was manually
+        // re-fullscreened in the meantime
+        self.suspended
+            .retain(|(a, _, _)| self.entries.iter().any(|e| &e.address == a && !e.fullscreen));
         // drop pins whose window closed (checked against ALL windows,
         // before any workspace filtering, so other-workspace pins survive)
         self.pinned_windows
@@ -574,77 +575,36 @@ impl Switcher {
     }
 
     /// Focus a window. If a fullscreen sibling on its workspace would keep
-    /// covering it, temporarily float it on top instead — floating BEFORE
-    /// focusing avoids Hyprland transferring fullscreen to the new focus.
-    /// Temp-floated windows are re-tiled when returning to the fullscreen
-    /// window (or when fullscreen ends).
+    /// covering it, SUSPEND that sibling's fullscreen first: internal
+    /// state goes back to tiled (the layout re-slots it exactly, since it
+    /// never left the layout tree) while the app keeps believing it is
+    /// fullscreen. It re-fullscreens when it regains focus.
     fn switch_to_address(&mut self, address: &str) {
         let Some(t) = self.entries.iter().find(|e| e.address == address).cloned() else {
             let _ = ctl::focus_window(address);
             return;
         };
-        let covered = !t.fullscreen
-            && self.entries.iter().any(|e| {
+        let sibling = self
+            .entries
+            .iter()
+            .find(|e| {
                 e.fullscreen && e.workspace_id == t.workspace_id && e.address != t.address
-            });
-        if covered {
-            if !t.floating {
-                // remember the tiled geometry so the layout can be restored
-                let orig = ctl::clients().ok().and_then(|cs| {
-                    cs.into_iter()
-                        .find(|c| c.address == address)
-                        .map(|c| (c.at, c.size))
-                });
-                // float it at its own tiled geometry: the window lifts in
-                // place, and the size stays deterministic across repeated
-                // hops (Hyprland's own float sizing shrinks a little on
-                // every setfloating round trip)
-                let mut cmds = vec![format!("dispatch setfloating address:{address}")];
-                if let Some((at, size)) = orig {
-                    cmds.push(format!(
-                        "dispatch resizewindowpixel exact {} {},address:{address}",
-                        size[0], size[1]
-                    ));
-                    cmds.push(format!(
-                        "dispatch movewindowpixel exact {} {},address:{address}",
-                        at[0], at[1]
-                    ));
-                }
-                let _ = ctl::batch(&cmds);
-                self.temp_floated.push((address.to_string(), orig));
-            }
-            let _ = ctl::focus_window(address);
-            let _ = ctl::raise_window(address);
-        } else {
-            // NOTE: temp-floated windows stay floating (hidden under the
-            // fullscreen app) until fullscreen actually ends — re-tiling
-            // on every hop nests them deeper into the layout each time.
-            let _ = ctl::focus_window(address);
+            })
+            .map(|e| e.address.clone());
+        if let (false, Some(f)) = (t.fullscreen, sibling) {
+            let client_state = ctl::clients()
+                .ok()
+                .and_then(|cs| cs.into_iter().find(|c| c.address == f))
+                .map(|c| c.fullscreen_client)
+                .unwrap_or(2);
+            // fullscreenstate acts on the active window; focusing the
+            // fullscreen window itself is safe (no fullscreen transfer)
+            let _ = ctl::focus_window(&f);
+            let _ = ctl::dispatch(&format!("fullscreenstate 0 {client_state}"));
+            self.suspended
+                .push((f, client_state, std::time::Instant::now()));
         }
-    }
-
-    /// Re-tile windows we floated to lift them over a fullscreen sibling.
-    /// Each is first moved back to its original tiled spot so the layout
-    /// re-inserts it where it came from.
-    fn restore_temp_floated(&mut self) {
-        for (addr, orig) in std::mem::take(&mut self.temp_floated) {
-            if !self.entries.iter().any(|e| e.address == addr) {
-                continue; // window closed meanwhile
-            }
-            let mut cmds = Vec::new();
-            if let Some((at, size)) = orig {
-                cmds.push(format!(
-                    "dispatch resizewindowpixel exact {} {},address:{addr}",
-                    size[0], size[1]
-                ));
-                cmds.push(format!(
-                    "dispatch movewindowpixel exact {} {},address:{addr}",
-                    at[0], at[1]
-                ));
-            }
-            cmds.push(format!("dispatch settiled address:{addr}"));
-            let _ = ctl::batch(&cmds);
-        }
+        let _ = ctl::focus_window(address);
     }
 
     fn focus_selected_and_hide(&mut self, cx: &mut Context<Self>) {
@@ -791,6 +751,18 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
                 Mode::Cycling => {}
             },
             HyprEvent::ActiveWindowChanged => {
+                // a suspended-fullscreen window regaining focus resumes
+                // fullscreen (covers panel switches, mouse clicks, other
+                // switchers alike). The age check skips the stale focus
+                // event from the suspend sequence itself.
+                if let Some(active) = ctl::active_address() {
+                    if let Some(pos) = self.suspended.iter().position(|(a, _, t)| {
+                        a == &active && t.elapsed() > Duration::from_millis(500)
+                    }) {
+                        let (_, client_state, _) = self.suspended.remove(pos);
+                        let _ = ctl::dispatch(&format!("fullscreenstate 2 {client_state}"));
+                    }
+                }
                 self.fullscreen_active = ctl::active_window_fullscreen();
                 if self.mode == Mode::Hidden {
                     self.dirty = true;
@@ -799,10 +771,6 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
             }
             HyprEvent::FullscreenChanged(active) => {
                 self.fullscreen_active = active;
-                if !active {
-                    // fullscreen ended: put temporarily floated windows back
-                    self.restore_temp_floated();
-                }
                 if self.mode == Mode::Hidden {
                     self.park();
                 }

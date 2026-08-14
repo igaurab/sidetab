@@ -47,6 +47,9 @@ pub struct Client {
     pub monitor: i64,
     /// 0 = not fullscreen (bitmask: 1 maximized, 2 fullscreen)
     pub fullscreen: i64,
+    /// fullscreen state as communicated to the client app
+    #[serde(rename = "fullscreenClient")]
+    pub fullscreen_client: i64,
 }
 
 #[derive(Deserialize, Debug, Clone)]
