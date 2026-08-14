@@ -80,7 +80,7 @@ fn open_settings(
             },
             |window, cx| {
                 window.set_window_title("Sidetab Settings");
-                cx.new(|_| crate::ui::settings::Settings::new(cfg, panel_entity))
+                cx.new(|cx| crate::ui::settings::Settings::new(cfg, panel_entity, cx))
             },
         )
     })??;

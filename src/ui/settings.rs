@@ -8,10 +8,12 @@ use crate::config::{Config, CycleScope, Edge, ThemeVariant};
 use crate::icons::IconResolver;
 use crate::ui::panel::Switcher;
 use gpui::{
-    canvas, div, img, prelude::*, px, rgba, svg, Bounds, Context, Entity, FocusHandle,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window,
+    canvas, div, img, prelude::*, px, rgba, svg, Animation, AnimationExt, Bounds, Context,
+    Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Window,
 };
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -34,7 +36,12 @@ const SECTIONS: [(Section, &str, &str); 5] = [
 enum Drag {
     Slider,
     Preview,
+    Width,
 }
+
+/// Panel width slider range in logical px.
+const WIDTH_MIN: f32 = 240.0;
+const WIDTH_MAX: f32 = 640.0;
 
 pub struct Settings {
     cfg: Config,
@@ -49,6 +56,7 @@ pub struct Settings {
     dragging: Option<Drag>,
     track_bounds: Option<Bounds<Pixels>>,
     preview_bounds: Option<Bounds<Pixels>>,
+    width_track_bounds: Option<Bounds<Pixels>>,
 }
 
 impl Settings {
@@ -64,6 +72,7 @@ impl Settings {
             dragging: None,
             track_bounds: None,
             preview_bounds: None,
+            width_track_bounds: None,
         }
     }
 
@@ -100,6 +109,15 @@ impl Settings {
                 let left = f32::from(pos.x) < f32::from(b.origin.x) + f32::from(b.size.width) / 2.0;
                 self.cfg.v_pos = frac;
                 self.cfg.edge = if left { Edge::Left } else { Edge::Right };
+            }
+            Some(Drag::Width) => {
+                let Some(b) = self.width_track_bounds else { return };
+                let usable = (f32::from(b.size.width) - 16.0).max(1.0);
+                let frac =
+                    ((f32::from(pos.x) - f32::from(b.origin.x) - 8.0) / usable).clamp(0.0, 1.0);
+                // snap to 10px steps within [WIDTH_MIN, WIDTH_MAX]
+                let w = WIDTH_MIN + (WIDTH_MAX - WIDTH_MIN) * frac;
+                self.cfg.width = (w / 10.0).round() * 10.0;
             }
             None => return,
         }
@@ -339,9 +357,27 @@ impl Settings {
                 ),
                 u,
             ))
+            .child(self.row(
+                "Hover zone",
+                self.stepper(
+                    "hoverzone",
+                    format!("{}px", cfg.hover_strip_px as i64),
+                    |this, cx| {
+                        this.mutate(|c| c.hover_strip_px = (c.hover_strip_px - 2.0).max(2.0), cx)
+                    },
+                    |this, cx| {
+                        this.mutate(|c| c.hover_strip_px = (c.hover_strip_px + 2.0).min(24.0), cx)
+                    },
+                    u,
+                    cx,
+                ),
+                u,
+            ))
             .child(self.hint(
-                "Show and hide delay control how quickly the sidebar expands \
-                 when hovered and retracts after the cursor leaves."
+                "Show and hide delay control how quickly the sidebar reveals \
+                 when hovered and hides after the cursor leaves. Hover zone \
+                 is the width of the invisible strip at the screen edge that \
+                 triggers the reveal — nothing is drawn there."
                     .to_string(),
                 u,
             ))
@@ -467,14 +503,70 @@ impl Settings {
             .child(self.heading("Panel", u))
             .child(self.row(
                 "Width",
-                self.stepper(
-                    "width",
-                    format!("{}px", cfg.width as i64),
-                    |this, cx| this.mutate(|c| c.width = (c.width - 20.0).max(240.0), cx),
-                    |this, cx| this.mutate(|c| c.width = (c.width + 20.0).min(640.0), cx),
-                    u,
-                    cx,
-                ),
+                {
+                    let wfrac =
+                        ((cfg.width - WIDTH_MIN) / (WIDTH_MAX - WIDTH_MIN)).clamp(0.0, 1.0);
+                    let entity = cx.entity();
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .id("wslider")
+                                .w(px(180.))
+                                .h(px(20.))
+                                .relative()
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                        this.dragging = Some(Drag::Width);
+                                        this.drag_update(ev.position, cx);
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top(px(8.))
+                                        .left(px(8.))
+                                        .right(px(8.))
+                                        .h(px(4.))
+                                        .rounded(px(2.))
+                                        .bg(rgba(u.row)),
+                                )
+                                .child(
+                                    canvas(
+                                        move |bounds, _, cx| {
+                                            entity.update(cx, |this, _| {
+                                                this.width_track_bounds = Some(bounds)
+                                            })
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .size_full(),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top(px(3.))
+                                        .left(gpui::relative(wfrac))
+                                        .ml(px(-14.0 * wfrac))
+                                        .w(px(14.))
+                                        .h(px(14.))
+                                        .rounded(px(7.))
+                                        .bg(rgba(u.accent)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(48.))
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(rgba(u.dim))
+                                .child(format!("{}px", cfg.width as i64)),
+                        )
+                },
                 u,
             ))
             .child(div().pt(px(8.)).pb(px(4.)).text_color(rgba(u.text)).child("Edge"))
@@ -551,51 +643,254 @@ impl Settings {
             ))
     }
 
-    fn pinned_pane(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
-        let cfg = self.cfg.clone();
+    /// Best icon for an installed app: its Icon= name, else its class.
+    fn app_icon(&self, app: &DesktopApp) -> Option<PathBuf> {
+        app.icon
+            .as_deref()
+            .and_then(|name| self.icons.resolve_name(name))
+            .or_else(|| self.icons.resolve(&app.class, ""))
+    }
+
+    fn letter_tile(&self, name: &str, class: &str) -> gpui::Div {
+        let letter = name.chars().next().unwrap_or('?').to_string();
+        let hash: u32 = class
+            .bytes()
+            .fold(5381u32, |h, b| h.wrapping_mul(33).wrapping_add(b as u32));
+        let hue = (hash % 360) as f32 / 360.0;
         div()
+            .w(px(18.))
+            .h(px(18.))
+            .flex_none()
+            .rounded(px(4.))
+            .bg(gpui::hsla(hue, 0.55, 0.5, 1.0))
             .flex()
-            .flex_col()
-            .child(self.heading("Pinned Apps", u))
+            .items_center()
+            .justify_center()
+            .text_size(px(11.))
+            .text_color(gpui::white())
+            .child(letter)
+    }
+
+    fn section_label(&self, label: &'static str, u: &Ui) -> impl IntoElement {
+        div()
+            .pt(px(4.))
+            .pb(px(6.))
+            .flex_none()
+            .text_size(px(11.))
+            .text_color(rgba(u.dim))
+            .child(label)
+    }
+
+    /// One row in the pinned-apps section: icon, name, pin toggle.
+    fn app_row(
+        &self,
+        id: (&'static str, usize),
+        icon: Option<PathBuf>,
+        name: String,
+        class: String,
+        pinned: bool,
+        u: &Ui,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tile = self.letter_tile(&name, &class);
+        div()
+            .id(id)
+            .h(px(30.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .hover(|d| d.bg(rgba(u.row)))
+            .child(match icon {
+                Some(path) => img(path).w(px(18.)).h(px(18.)).flex_none().into_any_element(),
+                None => tile.into_any_element(),
+            })
             .child(
-                div().flex().flex_wrap().gap(px(6.)).children(
-                    self.known_apps
-                        .clone()
-                        .into_iter()
-                        .enumerate()
-                        .map(|(ix, class)| {
-                            let active = cfg.pinned.contains(&class);
-                            let toggled = class.clone();
-                            self.chip(
-                                ("pin", ix),
-                                crate::windows::app_name(&class),
-                                active,
-                                move |this, cx| {
-                                    this.mutate(
-                                        |c| {
-                                            if let Some(pos) =
-                                                c.pinned.iter().position(|p| p == &toggled)
-                                            {
-                                                c.pinned.remove(pos);
-                                            } else {
-                                                c.pinned.push(toggled.clone());
-                                            }
-                                        },
-                                        cx,
-                                    )
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(rgba(u.text))
+                    .child(name),
+            )
+            .child(
+                div()
+                    .id((id.0, id.1 + 100_000))
+                    .w(px(24.))
+                    .h(px(24.))
+                    .flex_none()
+                    .rounded(px(5.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgba(u.row)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.mutate(
+                                |c| {
+                                    let before = c.pinned.len();
+                                    c.pinned.retain(|p| !class_matches(p, &class));
+                                    if c.pinned.len() == before {
+                                        c.pinned.push(class.clone());
+                                    }
                                 },
-                                u,
                                 cx,
                             )
                         }),
-                ),
+                    )
+                    .child(
+                        svg()
+                            .path("icons/pin.svg")
+                            .w(px(13.))
+                            .h(px(13.))
+                            .text_color(rgba(if pinned { u.accent } else { u.dim })),
+                    ),
             )
-            .child(self.hint(
-                "Pinned apps get their own section at the top of the panel. \
-                 Apps listed here are the ones currently running."
-                    .to_string(),
-                u,
-            ))
+    }
+
+    fn pinned_pane(&self, u: &Ui, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let cfg = self.cfg.clone();
+        let q = self.query.to_lowercase();
+
+        let mut pane = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .child(self.heading("Pinned Apps", u))
+            .child(
+                div()
+                    .pb(px(10.))
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(rgba(u.dim))
+                    .child(
+                        "Pin the apps you use most. Like the macOS dock, they get \
+                         their own section at the top of the panel — click one there \
+                         to open it even when it isn't running.",
+                    ),
+            );
+
+        // the Pinned section only exists once something is pinned
+        if !cfg.pinned.is_empty() {
+            pane = pane
+                .child(self.section_label("Pinned", u))
+                .children(cfg.pinned.iter().enumerate().map(|(ix, pin)| {
+                    let app = self.apps.iter().find(|a| class_matches(pin, &a.class));
+                    let name = app
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| crate::windows::app_name(pin));
+                    let icon = app
+                        .and_then(|a| self.app_icon(a))
+                        .or_else(|| self.icons.resolve(pin, ""));
+                    self.app_row(("pinned", ix), icon, name, pin.clone(), true, u, cx)
+                }))
+                .child(div().h(px(8.)).flex_none());
+        }
+
+        let search = div()
+            .id("appsearch")
+            .h(px(30.))
+            .flex_none()
+            .rounded(px(6.))
+            .bg(rgba(u.row))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.focus_handle);
+                    cx.notify();
+                }),
+            )
+            .child(
+                svg()
+                    .path("icons/search.svg")
+                    .w(px(12.))
+                    .h(px(12.))
+                    .flex_none()
+                    .text_color(rgba(u.dim)),
+            )
+            .child({
+                let focused = self.focus_handle.is_focused(window);
+                let caret = div()
+                    .w(px(1.5))
+                    .h(px(15.))
+                    .flex_none()
+                    .bg(rgba(u.text))
+                    .with_animation(
+                        "caret-blink",
+                        Animation::new(Duration::from_millis(1000)).repeat(),
+                        |el, t| el.opacity(if t < 0.5 { 1.0 } else { 0.0 }),
+                    );
+                let mut field = div().flex().items_center();
+                if !self.query.is_empty() {
+                    field = field.child(div().text_color(rgba(u.text)).child(self.query.clone()));
+                }
+                if focused {
+                    field = field.child(caret);
+                }
+                if self.query.is_empty() {
+                    field = field.child(
+                        div()
+                            .pl(px(2.))
+                            .text_color(rgba(u.dim))
+                            .child("Search applications…"),
+                    );
+                }
+                field
+            });
+
+        let matches: Vec<usize> = self
+            .apps
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| q.is_empty() || a.name.to_lowercase().contains(&q))
+            .map(|(ix, _)| ix)
+            .collect();
+
+        let mut list = div()
+            .id("appslist")
+            .flex_1()
+            .min_h(px(0.))
+            .mt(px(6.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        if matches.is_empty() {
+            list = list.child(
+                div()
+                    .pt(px(10.))
+                    .px(px(8.))
+                    .text_color(rgba(u.dim))
+                    .child("No matching applications"),
+            );
+        } else {
+            for app_ix in matches {
+                let app = &self.apps[app_ix];
+                let pinned = cfg.pinned.iter().any(|p| class_matches(p, &app.class));
+                list = list.child(self.app_row(
+                    ("app", app_ix),
+                    self.app_icon(app),
+                    app.name.clone(),
+                    app.class.clone(),
+                    pinned,
+                    u,
+                    cx,
+                ));
+            }
+        }
+
+        pane.child(self.section_label("All Applications", u))
+            .child(search)
+            .child(list)
     }
 
     fn about_pane(&self, u: &Ui) -> gpui::Div {
@@ -630,7 +925,7 @@ impl Settings {
 }
 
 impl Render for Settings {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let u = ui(&self.cfg);
         let active = self.active;
 
@@ -678,10 +973,12 @@ impl Render for Settings {
                     .when(!selected, |d| d.text_color(rgba(u.text)))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
+                        cx.listener(move |this, _, window, cx| {
                             this.active = section;
                             if section == Section::PinnedApps {
-                                this.known_apps = known_apps(&this.cfg);
+                                // fresh app list, and keyboard focus for the search bar
+                                this.apps = crate::apps::installed();
+                                window.focus(&this.focus_handle);
                             }
                             cx.notify();
                         }),
@@ -701,11 +998,42 @@ impl Render for Settings {
             Section::Panel => self.panel_pane(&u, cx),
             Section::Shortcuts => self.shortcuts_pane(&u, cx),
             Section::Appearance => self.appearance_pane(&u, cx),
-            Section::PinnedApps => self.pinned_pane(&u, cx),
+            Section::PinnedApps => self.pinned_pane(&u, window, cx),
             Section::About => self.about_pane(&u),
         };
 
         div()
+            .id("settings-root")
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                // the pinned-apps search bar is the only text input
+                if this.active != Section::PinnedApps {
+                    return;
+                }
+                match ev.keystroke.key.as_str() {
+                    "backspace" => {
+                        this.query.pop();
+                        cx.notify();
+                    }
+                    "escape" => {
+                        if !this.query.is_empty() {
+                            this.query.clear();
+                            cx.notify();
+                        }
+                    }
+                    _ => {
+                        if let Some(ch) = ev
+                            .keystroke
+                            .key_char
+                            .as_ref()
+                            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+                        {
+                            this.query.push_str(ch);
+                            cx.notify();
+                        }
+                    }
+                }
+            }))
             .size_full()
             .flex()
             .bg(rgba(u.bg))
