@@ -1,16 +1,13 @@
 # sidetab
 
+
+<img width="1056" height="778" alt="image" src="https://github.com/user-attachments/assets/f695a6c1-dbc5-43be-aed1-e1b081ca13be" />
+
+
 A [Contexts](https://contexts.co/)-style window switcher for **Hyprland** — a fast
 sidebar panel with windows grouped by workspace, real app icons, fuzzy search,
 and hover-reveal at the screen edge. Built in Rust with
 [GPUI](https://gpui.rs/) (Zed's GPU-accelerated UI framework).
-
-<img width="1056" height="778" alt="image" src="https://github.com/user-attachments/assets/f695a6c1-dbc5-43be-aed1-e1b081ca13be" />
-
-Super + Tab shows you apps in a particular workspace only
-
-<img width="1376" height="462" alt="image" src="https://github.com/user-attachments/assets/3b2ed3e4-fb9e-407b-8d19-99fd5fb213f6" />
-
 
 
 ## Features
