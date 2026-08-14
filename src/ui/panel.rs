@@ -1,7 +1,7 @@
 //! The switcher panel: a Contexts-style sidebar. Owns the presence state
 //! machine — every reveal/hide/focus transition funnels through here.
 
-use crate::config::{Config, CycleScope, Palette};
+use crate::config::{Config, CycleScope, Palette, CARD_ROUNDING};
 use crate::daemon::Msg;
 use crate::hypr::ctl;
 use crate::hypr::events::HyprEvent;
@@ -158,7 +158,7 @@ impl Switcher {
     }
 
     pub fn set_address(&mut self, address: String, cx: &mut Context<Self>) {
-        let _ = ctl::remove_border(&address);
+        let _ = ctl::remove_chrome(&address);
         self.address = Some(address);
         self.set_nofocus(true);
         // the freshly mapped window may have grabbed focus before the
@@ -337,6 +337,18 @@ impl Switcher {
         self.mode == Mode::Cycling
     }
 
+    /// Width the content card renders at. The centered Alt-Tab overlay has
+    /// its own width — the configured panel width only sizes the sidebar.
+    fn card_width(&self) -> f32 {
+        if let Some(w) = self.width_preview {
+            w
+        } else if self.centered() {
+            self.cfg.overlay_width
+        } else {
+            self.cfg.width
+        }
+    }
+
     /// (revealed_x, hidden_x, y, w, h) in Hyprland logical layout coords.
     /// Height always fits the full content (clamped only by the monitor).
     fn geometry(&self, mon: &ctl::Monitor) -> (i64, i64, i64, i64, i64) {
@@ -346,7 +358,7 @@ impl Switcher {
         let w = if self.width_preview.is_some() {
             crate::config::WIDTH_MAX as f64
         } else {
-            self.cfg.width as f64
+            self.card_width() as f64
         };
         let h = (self.content_height() as f64 + 4.0).min(mh - 16.0);
         // Park entirely offscreen — hover detection is cursor-polling based,
@@ -397,6 +409,13 @@ impl Switcher {
             self.refresh();
         }
         self.palette = self.cfg.theme.palette();
+        // A config reload (an Omarchy theme switch is one) wipes the
+        // runtime window rules, and a focused panel without them wears the
+        // theme's focus border. Re-assert on each reveal — the only time a
+        // border could show.
+        if let Some(addr) = &self.address {
+            let _ = ctl::remove_chrome(addr);
+        }
         self.place(true);
         // raising marks the panel allowed-over-fullscreen, so it shows
         // above fullscreen windows too
@@ -708,6 +727,15 @@ impl Switcher {
         match ev {
             HyprEvent::ConfigReloaded => {
                 let _ = ctl::apply_panel_rules();
+                // the rules above are only rules; the window still needs
+                // re-tagging to pick them up
+                if let Some(addr) = &self.address {
+                    let _ = ctl::remove_chrome(addr);
+                }
+                // Omarchy switches themes with a config reload; re-read the
+                // colors so a revealed panel restyles in place.
+                self.palette = self.cfg.theme.palette();
+                cx.notify();
                 if self.mode == Mode::Hidden {
                     self.set_nofocus(true);
                     self.park();
@@ -982,7 +1010,7 @@ impl Switcher {
             .items_center()
             .gap(px(8.))
             .px(px(8.))
-            .rounded(px(5.))
+            .rounded(px(6.))
             .when(selected, |d| {
                 d.bg(rgba(p.accent)).text_color(rgba(p.accent_text))
             })
@@ -1234,7 +1262,7 @@ impl Render for Switcher {
             } else {
                 8.0 + 24.0
             };
-            let x = f32::from(m.position.x).clamp(0.0, self.cfg.width - 150.0);
+            let x = f32::from(m.position.x).clamp(0.0, (self.card_width() - 150.0).max(0.0));
             let y = f32::from(m.position.y)
                 .min(self.content_height() - menu_h - 8.0)
                 .max(0.0);
@@ -1246,9 +1274,11 @@ impl Render for Switcher {
                 .w(px(140.))
                 .p(px(4.))
                 .rounded(px(8.))
+                // menus stay opaque: they float over the list, and a second
+                // translucent layer makes their labels unreadable
                 .bg(rgba((p.background & 0xffffff00) | 0xff))
                 .border_1()
-                .border_color(rgba(p.border))
+                .border_color(rgba(if p.dark { 0xffffff33 } else { 0x00000033 }))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.menu = None;
                     cx.notify();
@@ -1320,9 +1350,13 @@ impl Render for Switcher {
             .bg(rgba(p.background))
             .border_1()
             .border_color(rgba(p.border))
-            .when(self.centered(), |d| d.rounded(px(10.)))
-            .when(!self.centered() && left, |d| d.rounded_r(px(10.)))
-            .when(!self.centered() && !left, |d| d.rounded_l(px(10.)))
+            .when(self.centered(), |d| d.rounded(px(CARD_ROUNDING)))
+            .when(!self.centered() && left, |d| {
+                d.rounded_r(px(CARD_ROUNDING))
+            })
+            .when(!self.centered() && !left, |d| {
+                d.rounded_l(px(CARD_ROUNDING))
+            })
             .pt(px(PAD_V))
             .pb(px(PAD_V))
             .text_size(px(13.))
@@ -1352,37 +1386,36 @@ impl Render for Switcher {
                     // in search mode the typed query lives quietly in the
                     // header instead of a dedicated input box
                     .when(self.mode == Mode::Search, |d| {
-                        d.child(div().flex_none().text_color(rgba(p.text)).child(
-                            if self.query.is_empty() {
-                                "type to filter".to_string()
-                            } else {
-                                format!("{}▏", self.query)
-                            },
-                        ))
-                    })
-                    .when(self.mode != Mode::Search, |d| {
                         d.child(
                             div()
-                                .id("gear")
                                 .flex_none()
-                                .cursor_pointer()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|_, _, _, _| {
-                                        // routed through the control socket so the
-                                        // daemon pump owns the settings window
-                                        let _ = crate::client::send("settings");
-                                    }),
-                                )
-                                .child(
-                                    gpui::svg()
-                                        .path("icons/settings.svg")
-                                        .w(px(13.))
-                                        .h(px(13.))
-                                        .text_color(rgba(p.dim_text)),
-                                ),
+                                .mr(px(8.))
+                                .text_color(rgba(p.text))
+                                .child(format!("{}▏", self.query)),
                         )
-                    }),
+                    })
+                    // the gear stays put in every mode, search included
+                    .child(
+                        div()
+                            .id("gear")
+                            .flex_none()
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, _| {
+                                    // routed through the control socket so the
+                                    // daemon pump owns the settings window
+                                    let _ = crate::client::send("settings");
+                                }),
+                            )
+                            .child(
+                                gpui::svg()
+                                    .path("icons/settings.svg")
+                                    .w(px(13.))
+                                    .h(px(13.))
+                                    .text_color(rgba(p.dim_text)),
+                            ),
+                    ),
             )
             .child(list)
             .children(menu_overlay);

@@ -4,7 +4,7 @@
 //! immediately and persists to ~/.config/sidetab/config.toml.
 
 use crate::apps::{class_matches, DesktopApp};
-use crate::config::{Config, CycleScope, Edge, ThemeVariant, WIDTH_MAX, WIDTH_MIN};
+use crate::config::{mix, Config, CycleScope, Edge, ThemeVariant, WIDTH_MAX, WIDTH_MIN};
 use crate::icons::IconResolver;
 use crate::ui::panel::Switcher;
 use gpui::{
@@ -152,14 +152,20 @@ struct Ui {
 
 fn ui(cfg: &Config) -> Ui {
     let p = cfg.theme.palette();
-    let dark = match cfg.theme.variant {
-        ThemeVariant::Dark => true,
-        ThemeVariant::Light => false,
-        ThemeVariant::System => crate::config::system_prefers_dark(),
-    };
+    let dark = p.dark;
     Ui {
-        bg: if dark { 0x1f2023ff } else { 0xf4f4f5ff },
-        nav_bg: if dark { 0x18191bff } else { 0xe9e9ebff },
+        // tinted toward the panel's own background so the settings window
+        // reads as part of the same theme (Omarchy colors included)
+        bg: if dark {
+            mix(0x1f2023ff, p.background, 0.5)
+        } else {
+            mix(0xf4f4f5ff, p.background, 0.5)
+        },
+        nav_bg: if dark {
+            mix(0x18191bff, p.background, 0.35)
+        } else {
+            mix(0xe9e9ebff, p.background, 0.35)
+        },
         row: if dark { 0xffffff10 } else { 0x00000010 },
         text: p.text,
         dim: p.dim_text,
@@ -320,6 +326,32 @@ impl Settings {
                  the stock behavior: Alt+Tab cycles windows the plain \
                  Hyprland way (no panel), Super+Tab switches to the next \
                  workspace."
+                    .to_string(),
+                u,
+            ))
+            .child(self.row(
+                "Overlay width",
+                self.stepper(
+                    "overlaywidth",
+                    format!("{}px", cfg.overlay_width as i64),
+                    |this, cx| {
+                        this.mutate(
+                            |c| c.overlay_width = (c.overlay_width - 40.0).max(WIDTH_MIN),
+                            cx,
+                        )
+                    },
+                    |this, cx| {
+                        this.mutate(|c| c.overlay_width = (c.overlay_width + 40.0).min(1200.0), cx)
+                    },
+                    u,
+                    cx,
+                ),
+                u,
+            ))
+            .child(self.hint(
+                "Width of the centered overlay both shortcuts show. It's \
+                 separate from the sidebar width, so the overlay can stay \
+                 wide enough for long window titles."
                     .to_string(),
                 u,
             ))
@@ -506,7 +538,7 @@ impl Settings {
             .flex_col()
             .child(self.heading("Panel", u))
             .child(self.row(
-                "Width",
+                "Sidebar width",
                 {
                     let wfrac =
                         ((cfg.width - WIDTH_MIN) / (WIDTH_MAX - WIDTH_MIN)).clamp(0.0, 1.0);
@@ -621,6 +653,7 @@ impl Settings {
             .child(
                 div().flex().gap(px(6.)).children(
                     [
+                        (ThemeVariant::Omarchy, "Omarchy"),
                         (ThemeVariant::System, "System"),
                         (ThemeVariant::Light, "Light"),
                         (ThemeVariant::Dark, "Dark"),
@@ -640,8 +673,11 @@ impl Settings {
                 ),
             )
             .child(self.hint(
-                "System follows your desktop's light/dark preference. Colors \
-                 can be overridden in the config file."
+                "Omarchy takes its colors from your current Omarchy theme and \
+                 follows every theme switch (falling back to System when \
+                 Omarchy isn't installed). System follows your desktop's \
+                 light/dark preference. Colors can be overridden in the config \
+                 file."
                     .to_string(),
                 u,
             ))

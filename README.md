@@ -30,11 +30,15 @@ and hover-reveal at the screen edge. Built in Rust with
   config edits needed. Disabling a shortcut restores the stock behavior
   (plain Hyprland window cycling / next-workspace switching).
 - **Mouse friendly**: hover to highlight, click to switch.
-- **Light/dark themes**, following your system preference by default.
+- **Follows your Omarchy theme**: colors come from the current theme's
+  `colors.toml` (background, foreground, accent, light/dark), re-read on
+  every reveal, so switching themes or wallpapers restyles the panel with
+  no restart. Falls back to your system light/dark preference elsewhere.
 - **Settings GUI** (`sidetab settings`), laid out like the Contexts
-  preferences: panel width, edge margin, six position presets plus a
-  fine-tune slider with a mini screen preview (the real panel moves live
-  while you drag), hover behavior, delays, theme, and pinned apps.
+  preferences: panel width (down to 170px), Alt-Tab overlay width, six
+  position presets plus a fine-tune slider with a mini screen preview (the
+  real panel moves live while you drag), hover behavior, delays, theme, and
+  pinned apps.
 
 ## Install
 
@@ -100,7 +104,8 @@ Settings are edited from the GUI (`sidetab settings`) or by hand in
 
 ```toml
 edge = "left"              # left | right
-width = 320.0
+width = 320.0              # docked sidebar (hover reveal, show, search)
+overlay_width = 640.0      # centered Alt-Tab / Super+Tab overlay
 v_pos = 0.5                # placement along the edge, 0.0 top .. 1.0 bottom
                            # (set it visually from the settings slider/preview)
 alt_tab = "all-workspaces"      # all-workspaces | current-workspace | disabled
@@ -114,9 +119,9 @@ pinned = ["Spotify"]       # window classes shown in the Pinned section
                            # (easier: toggle apps in `sidetab settings`)
 
 [theme]
-variant = "system"         # system | light | dark
+variant = "omarchy"        # omarchy | system | light | dark
 # Optional color overrides ("#rrggbb" or "#rrggbbaa"):
-# background = "#f2f2f2cc"
+# background = "#f2f2f2"
 # accent = "#2c6fef"
 # text = "#2b2b2b"
 # dim_text = "#8a8a8a"
@@ -132,8 +137,14 @@ pinned, chromeless panel (rules applied via `hyprctl` at runtime and
 re-applied on config reload). Hiding parks the window off-screen leaving a
 few pixels as a hover target. Key bindings talk to the daemon over a unix
 socket at `$XDG_RUNTIME_DIR/sidetab.sock`, and the daemon tracks your
-windows through Hyprland's event socket. The panel is `no_focus`-tagged so
-hovering never steals your keyboard; search mode lifts the tag while open.
+windows through Hyprland's event socket.
+
+Two window tags carry the rules that have to change on a live window, since
+Hyprland only re-evaluates rules when a window's tags change: the panel is
+`no_focus`-tagged so hovering never steals your keyboard (search mode lifts
+the tag while open), and `sidetab-chromeless` carries `border_size 0`,
+`no_shadow on` and the panel's corner rounding — the last one matters
+because Hyprland clips a window's blur region to the window's rounding.
 
 ## License
 

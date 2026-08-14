@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- **Omarchy theming**: the new `theme.variant = "omarchy"` (now the default)
+  reads background, foreground, accent and light/dark from the current
+  Omarchy theme's `colors.toml` on every reveal, so theme switches restyle
+  the panel live. Falls back to `system` when Omarchy isn't installed. The
+  settings window picks up the same colors.
+- The centered Alt-Tab / Super+Tab overlay has its own width
+  (`overlay_width`, default 640px, in settings under Switching). The panel
+  width now only sizes the docked sidebar, so a narrow sidebar no longer
+  cramps window titles in the overlay.
+- The sidebar can be narrowed to 170px (was 240px).
+- The search header shows the settings gear like every other mode, and drops
+  the "type to filter" placeholder.
+
+### Fixed
+
+- No more dark squares in the panel's corners. Hyprland clips a window's blur
+  region to the *window's* rounding, so a square window painted blur into the
+  corners the rounded card leaves transparent; the window now rounds to the
+  same radius as the card (`CARD_ROUNDING`, 12px, shared by the rule and the
+  card so they can't drift).
+- The panel no longer picks up the theme's focus border after a Hyprland
+  config reload (an Omarchy theme switch triggers one). `border_size 0`,
+  `no_shadow on` and the rounding moved from `hyprctl setprop` — which no
+  longer exists in Hyprland 0.56, so it had silently stopped working — to
+  rules scoped to a `sidetab-chromeless` tag, re-tagged on every reveal.
+  Re-tagging is what forces Hyprland to re-evaluate rules on a live window;
+  re-adding the rule alone does not. Reloads also re-read theme colors,
+  restyling a revealed panel in place.
+
 ## 0.1.1
 
 - The panel no longer hides after **Close Window** from the right-click menu,

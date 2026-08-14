@@ -132,22 +132,28 @@ pub fn active_address() -> Option<String> {
 /// chromeless, instant, and never taking keyboard focus (hover must not
 /// steal focus with follow_mouse=1). Re-applied on configreloaded.
 pub fn apply_panel_rules() -> Result<()> {
+    let rounding = crate::config::CARD_ROUNDING as i64;
     let rules = [
-        "float on, match:class sidetab",
-        "pin on, match:class sidetab",
-        "border_size 0, match:class sidetab",
-        "no_anim on, match:class sidetab",
-        "no_shadow on, match:class sidetab",
-        "rounding 0, match:class sidetab",
+        "float on, match:class sidetab".to_string(),
+        "pin on, match:class sidetab".to_string(),
+        "no_anim on, match:class sidetab".to_string(),
         // no_focus is tag-scoped so the daemon can lift it for search mode
         // (tagwindow +/- sidetab-nofocus); a class rule could never be lifted.
-        "no_focus on, match:tag sidetab-nofocus",
+        "no_focus on, match:tag sidetab-nofocus".to_string(),
+        // The chrome rules are tag-scoped so they can be re-asserted on a
+        // live window — see remove_chrome.
+        format!("border_size 0, match:tag {CHROMELESS_TAG}"),
+        format!("no_shadow on, match:tag {CHROMELESS_TAG}"),
+        // matching the card's own radius: Hyprland clips the window's blur
+        // region to this, and a square region bleeds into the card's
+        // transparent corners
+        format!("rounding {rounding}, match:tag {CHROMELESS_TAG}"),
         // focusing the panel on a fullscreen workspace must never transfer
         // fullscreen onto the panel itself (mouse use over fullscreen apps)
-        "sync_fullscreen off, match:class sidetab",
-        "float on, match:class sidetab-settings",
-        "size 620 600, match:class sidetab-settings",
-        "center on, match:class sidetab-settings",
+        "sync_fullscreen off, match:class sidetab".to_string(),
+        "float on, match:class sidetab-settings".to_string(),
+        "size 620 600, match:class sidetab-settings".to_string(),
+        "center on, match:class sidetab-settings".to_string(),
     ];
     batch(
         &rules
@@ -157,12 +163,23 @@ pub fn apply_panel_rules() -> Result<()> {
     )
 }
 
-/// Kill the window's border via a per-window prop. Unlike keyword-applied
-/// windowrules (wiped on every config reload until we re-apply them), a
-/// setprop sticks to the window, so the panel can never flash the theme's
-/// focus border.
-pub fn remove_border(address: &str) -> Result<()> {
-    request(&format!("setprop address:{address} bordersize 0")).map(|_| ())
+pub const CHROMELESS_TAG: &str = "sidetab-chromeless";
+
+/// Strip the window's decorations: no focus border, no drop shadow, and a
+/// rounding that matches the card so Hyprland's blur stays inside it.
+///
+/// The rules themselves are applied by [`apply_panel_rules`]; this forces
+/// Hyprland to (re-)evaluate them on the live window. Rules only land on a
+/// window when it maps, a config reload wipes every keyword-applied rule,
+/// and re-adding a rule afterwards doesn't re-decorate an existing window —
+/// `hyprctl setprop`, which used to patch a mapped window, is gone as of
+/// Hyprland 0.56. Changing a window's tags does trigger a re-evaluation,
+/// hence the drop-and-re-add.
+pub fn remove_chrome(address: &str) -> Result<()> {
+    batch(&[
+        format!("dispatch tagwindow -{CHROMELESS_TAG} address:{address}"),
+        format!("dispatch tagwindow +{CHROMELESS_TAG} address:{address}"),
+    ])
 }
 
 fn no_warps_enabled() -> bool {
