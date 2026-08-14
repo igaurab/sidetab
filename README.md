@@ -45,12 +45,6 @@ Super + Tab shows you apps in a particular workspace only
 cargo install sidetab
 ```
 
-or from the AUR:
-
-```sh
-yay -S sidetab
-```
-
 Requires Hyprland ≥ 0.53 (new windowrule syntax), Vulkan, and Rust 1.85+
 if building from source.
 
