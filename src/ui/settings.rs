@@ -3,12 +3,15 @@
 //! right. Lives in the daemon; every change applies to the panel
 //! immediately and persists to ~/.config/sidetab/config.toml.
 
+use crate::apps::{class_matches, DesktopApp};
 use crate::config::{Config, CycleScope, Edge, ThemeVariant};
+use crate::icons::IconResolver;
 use crate::ui::panel::Switcher;
 use gpui::{
-    canvas, div, img, prelude::*, px, rgba, svg, Bounds, Context, Entity, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window,
+    canvas, div, img, prelude::*, px, rgba, svg, Bounds, Context, Entity, FocusHandle,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window,
 };
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -37,32 +40,27 @@ pub struct Settings {
     cfg: Config,
     panel: Entity<Switcher>,
     active: Section,
-    /// distinct app classes of open windows plus already-pinned ones
-    known_apps: Vec<String>,
+    /// every installed application (from .desktop entries), sorted by name
+    apps: Vec<DesktopApp>,
+    /// filter typed into the pinned-apps search bar
+    query: String,
+    icons: IconResolver,
+    focus_handle: FocusHandle,
     dragging: Option<Drag>,
     track_bounds: Option<Bounds<Pixels>>,
     preview_bounds: Option<Bounds<Pixels>>,
 }
 
-fn known_apps(cfg: &Config) -> Vec<String> {
-    let mut apps: Vec<String> = crate::windows::fetch()
-        .into_iter()
-        .map(|e| e.class)
-        .chain(cfg.pinned.iter().cloned())
-        .collect();
-    apps.sort();
-    apps.dedup();
-    apps
-}
-
 impl Settings {
-    pub fn new(cfg: Config, panel: Entity<Switcher>) -> Self {
-        let known_apps = known_apps(&cfg);
+    pub fn new(cfg: Config, panel: Entity<Switcher>, cx: &mut Context<Self>) -> Self {
         Settings {
             cfg,
             panel,
             active: Section::Panel,
-            known_apps,
+            apps: crate::apps::installed(),
+            query: String::new(),
+            icons: IconResolver::new(),
+            focus_handle: cx.focus_handle(),
             dragging: None,
             track_bounds: None,
             preview_bounds: None,

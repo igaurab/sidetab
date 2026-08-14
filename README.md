@@ -106,7 +106,8 @@ v_pos = 0.5                # placement along the edge, 0.0 top .. 1.0 bottom
                            # (set it visually from the settings slider/preview)
 alt_tab = "all-workspaces"      # all-workspaces | current-workspace | disabled
 super_tab = "current-workspace" # what each cycling shortcut shows
-hover_strip_px = 4.0       # hover target width while hidden (no GUI control)
+hover_strip_px = 4.0       # width of the invisible hover trigger zone at the
+                           # screen edge (nothing is shown while hidden)
 show_delay_ms = 120
 hide_delay_ms = 300
 # font = "Inter"           # optional UI font override

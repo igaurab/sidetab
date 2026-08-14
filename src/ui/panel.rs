@@ -243,11 +243,27 @@ impl Switcher {
             for g in &self.groups {
                 h += GROUP_HEADER_H + g.rows.len() as f32 * ROW_H;
             }
-            if self.groups.is_empty() {
+            if self.show_launchers() {
+                if !self.has_pinned_group() {
+                    h += GROUP_HEADER_H;
+                }
+                h += self.launchers.len() as f32 * ROW_H;
+            }
+            if self.groups.is_empty() && !self.show_launchers() {
                 h += ROW_H;
             }
         }
         h
+    }
+
+    /// Dock rows for not-running pinned apps appear in the docked grouped
+    /// view, not in the centered cycling overlay or search results.
+    fn show_launchers(&self) -> bool {
+        !self.launchers.is_empty() && !self.centered() && !self.searching()
+    }
+
+    fn has_pinned_group(&self) -> bool {
+        self.groups.first().is_some_and(|g| g.label == "Pinned")
     }
 
     /// True while a cycling session should present as a centered overlay
@@ -262,11 +278,10 @@ impl Switcher {
         let (mw, mh) = mon.logical_size();
         let w = self.cfg.width as f64;
         let h = (self.content_height() as f64 + 4.0).min(mh - 16.0);
-        let strip = if self.fullscreen_active {
-            -8.0 // park fully offscreen
-        } else {
-            self.cfg.hover_strip_px as f64
-        };
+        // Park entirely offscreen — hover detection is cursor-polling based,
+        // so no visible sliver is needed (hover_strip_px is only the width
+        // of the invisible trigger zone at the edge).
+        let strip = -8.0;
         let (x_shown, x_hidden) = if self.cfg.edge.is_left() {
             (mon.x as f64, mon.x as f64 - w + strip)
         } else {
@@ -756,11 +771,10 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
 
     // ---- render helpers ----
 
-    fn letter_tile(&self, entry: &WinEntry) -> gpui::Div {
-        let name = windows::app_name(&entry.class);
+    fn letter_tile(&self, class: &str) -> gpui::Div {
+        let name = windows::app_name(class);
         let letter = name.chars().next().unwrap_or('?').to_string();
-        let hash: u32 = entry
-            .class
+        let hash: u32 = class
             .bytes()
             .fold(5381u32, |h, b| h.wrapping_mul(33).wrapping_add(b as u32));
         let hue = (hash % 360) as f32 / 360.0;
@@ -810,7 +824,7 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
             })
             .child(match icon {
                 Some(path) => img(path).w(px(18.)).h(px(18.)).flex_none().into_any_element(),
-                None => self.letter_tile(entry).into_any_element(),
+                None => self.letter_tile(&entry.class).into_any_element(),
             })
             .child(
                 div()
@@ -847,6 +861,62 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
                 }),
             )
     }
+
+    fn group_header(&self, label: String) -> gpui::Div {
+        let p = self.palette;
+        div()
+            .h(px(GROUP_HEADER_H))
+            .flex_none()
+            .px(px(8.))
+            .flex()
+            .items_end()
+            .pb(px(3.))
+            .text_size(px(11.))
+            .text_color(rgba(p.dim_text))
+            .child(label)
+    }
+
+    /// A pinned app with no window: dimmed row that launches it on click.
+    fn render_launcher_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let l = &self.launchers[ix];
+        let p = self.palette;
+        let icon = self.icons.resolve(&l.class, "");
+        let class = l.class.clone();
+        let exec = l.exec.clone();
+        div()
+            .id(("launch", ix))
+            .h(px(ROW_H))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .rounded(px(5.))
+            .cursor_pointer()
+            .hover(|d| d.bg(rgba(p.border)))
+            .child(match icon {
+                Some(path) => img(path).w(px(18.)).h(px(18.)).flex_none().into_any_element(),
+                None => self.letter_tile(&class).into_any_element(),
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(rgba(p.dim_text))
+                    .child(l.name.clone()),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    if let Some(exec) = &exec {
+                        let _ = ctl::dispatch(&format!("exec {exec}"));
+                    }
+                    this.rest(cx);
+                }),
+            )
+    }
 }
 
 impl Render for Switcher {
@@ -875,7 +945,7 @@ impl Render for Switcher {
                     list = list.child(self.render_row(pos, entry_ix, cx));
                 }
             }
-        } else if self.groups.is_empty() {
+        } else if self.groups.is_empty() && !self.show_launchers() {
             list = list.child(
                 div()
                     .h(px(ROW_H))
@@ -886,24 +956,27 @@ impl Render for Switcher {
                     .child("No windows"),
             );
         } else {
+            // pinned apps with no window sit under the Pinned header,
+            // after any running pinned windows (dock-style launchers)
+            if self.show_launchers() && !self.has_pinned_group() {
+                list = list.child(self.group_header("Pinned".to_string()));
+                for ix in 0..self.launchers.len() {
+                    list = list.child(self.render_launcher_row(ix, cx));
+                }
+            }
             let groups = self.groups.clone();
             let mut pos = 0;
             for g in groups {
-                list = list.child(
-                    div()
-                        .h(px(GROUP_HEADER_H))
-                        .flex_none()
-                        .px(px(8.))
-                        .flex()
-                        .items_end()
-                        .pb(px(3.))
-                        .text_size(px(11.))
-                        .text_color(rgba(p.dim_text))
-                        .child(g.label.clone()),
-                );
+                let is_pinned_group = g.label == "Pinned";
+                list = list.child(self.group_header(g.label.clone()));
                 for entry_ix in g.rows {
                     list = list.child(self.render_row(pos, entry_ix, cx));
                     pos += 1;
+                }
+                if is_pinned_group && self.show_launchers() {
+                    for ix in 0..self.launchers.len() {
+                        list = list.child(self.render_launcher_row(ix, cx));
+                    }
                 }
             }
         }
