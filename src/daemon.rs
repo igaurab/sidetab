@@ -101,7 +101,9 @@ pub fn run() -> Result<()> {
     let cmd_rx = spawn_control_listener(listener);
     let event_rx = events::spawn_reader();
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new()
+        .with_assets(crate::assets::Assets)
+        .run(move |cx: &mut App| {
         let width = cfg.width;
         let window = cx
             .open_window(

@@ -166,9 +166,11 @@ pub fn parse_hex(s: &str) -> Option<u32> {
 pub struct Config {
     pub position: Position,
     pub width: f32,
-    /// Gap between the panel and the screen edge it is vertically aligned
-    /// to (top/bottom positions; center ignores it).
+    /// Gap kept between the panel and the top/bottom screen edges.
     pub margin_px: f32,
+    /// Fine-tuned vertical position along the edge, 0.0 (top) to 1.0
+    /// (bottom). None = use the preset from `position`.
+    pub v_pos: Option<f32>,
     pub hover_reveal: bool,
     pub hover_strip_px: f32,
     pub show_delay_ms: u64,
@@ -186,6 +188,7 @@ impl Default for Config {
             position: Position::LeftCenter,
             width: 320.0,
             margin_px: 24.0,
+            v_pos: None,
             hover_reveal: true,
             hover_strip_px: 4.0,
             show_delay_ms: 120,
@@ -204,6 +207,14 @@ pub fn config_path() -> PathBuf {
 }
 
 impl Config {
+    /// Vertical placement fraction along the edge (0 top .. 1 bottom):
+    /// the fine-tuned value if set, else the `position` preset.
+    pub fn v_frac(&self) -> f32 {
+        self.v_pos
+            .unwrap_or_else(|| self.position.v_align())
+            .clamp(0.0, 1.0)
+    }
+
     pub fn load() -> Config {
         std::fs::read_to_string(config_path())
             .ok()

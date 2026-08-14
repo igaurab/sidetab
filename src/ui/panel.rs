@@ -238,17 +238,11 @@ impl Switcher {
                 mon.y as f64 + (mh - h) / 2.0,
             )
         } else {
-            // margin keeps top/bottom placements off the screen edge;
-            // center alignment ignores it
-            let align = self.cfg.position.v_align() as f64;
-            let margin = if align < 0.25 {
-                self.cfg.margin_px as f64
-            } else if align > 0.75 {
-                -(self.cfg.margin_px as f64)
-            } else {
-                0.0
-            };
-            (x_shown, mon.y as f64 + (mh - h) * align + margin)
+            // slide along the edge between margins: 0 = top, 1 = bottom
+            let frac = self.cfg.v_frac() as f64;
+            let margin = self.cfg.margin_px as f64;
+            let usable = (mh - h - 2.0 * margin).max(0.0);
+            (x_shown, mon.y as f64 + margin + usable * frac)
         };
         (x_shown as i64, x_hidden as i64, y as i64, w as i64, h as i64)
     }
@@ -637,6 +631,24 @@ impl Switcher {
 
     // ---- config (settings window will call this) ----
 
+    /// Reveal the panel (unfocused) so settings can preview placement live.
+    pub fn preview_reveal(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.mode, Mode::Hidden | Mode::HoverPending) {
+            self.scope = Scope::All;
+            self.refresh();
+            self.mode = Mode::Revealed;
+            self.hover_originated = false;
+            self.selected = self.mru_position();
+        }
+        self.reveal_now(cx);
+    }
+
+    pub fn preview_end(&mut self, cx: &mut Context<Self>) {
+        if self.mode == Mode::Revealed {
+            self.hide_now(cx);
+        }
+    }
+
     pub fn update_config(&mut self, cfg: Config, cx: &mut Context<Self>) {
         self.cfg = cfg;
         self.palette = self.cfg.theme.palette();
@@ -864,7 +876,13 @@ impl Render for Switcher {
                                         let _ = crate::client::send("settings");
                                     }),
                                 )
-                                .child("⚙"),
+                                .child(
+                                    gpui::svg()
+                                        .path("icons/settings.svg")
+                                        .w(px(13.))
+                                        .h(px(13.))
+                                        .text_color(rgba(p.dim_text)),
+                                ),
                         )
                     }),
             )

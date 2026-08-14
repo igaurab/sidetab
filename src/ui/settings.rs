@@ -5,7 +5,10 @@
 
 use crate::config::{Config, Position, ThemeVariant};
 use crate::ui::panel::Switcher;
-use gpui::{div, prelude::*, px, rgba, Context, Entity, MouseButton, Window};
+use gpui::{
+    canvas, div, prelude::*, px, rgba, svg, Bounds, Context, Entity, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -17,12 +20,18 @@ enum Section {
 }
 
 const SECTIONS: [(Section, &str, &str); 5] = [
-    (Section::General, "⚙", "General"),
-    (Section::Panel, "▤", "Panel"),
-    (Section::Appearance, "◐", "Appearance"),
-    (Section::PinnedApps, "★", "Pinned Apps"),
-    (Section::About, "ⓘ", "About"),
+    (Section::General, "icons/settings.svg", "General"),
+    (Section::Panel, "icons/panel.svg", "Panel"),
+    (Section::Appearance, "icons/appearance.svg", "Appearance"),
+    (Section::PinnedApps, "icons/pin.svg", "Pinned Apps"),
+    (Section::About, "icons/info.svg", "About"),
 ];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Drag {
+    Slider,
+    Preview,
+}
 
 pub struct Settings {
     cfg: Config,
@@ -30,6 +39,9 @@ pub struct Settings {
     active: Section,
     /// distinct app classes of open windows plus already-pinned ones
     known_apps: Vec<String>,
+    dragging: Option<Drag>,
+    track_bounds: Option<Bounds<Pixels>>,
+    preview_bounds: Option<Bounds<Pixels>>,
 }
 
 fn known_apps(cfg: &Config) -> Vec<String> {
@@ -51,11 +63,19 @@ impl Settings {
             panel,
             active: Section::General,
             known_apps,
+            dragging: None,
+            track_bounds: None,
+            preview_bounds: None,
         }
     }
 
     fn apply(&mut self, cx: &mut Context<Self>) {
         let _ = self.cfg.save();
+        self.apply_live(cx);
+    }
+
+    /// Push to the panel without persisting (used mid-drag).
+    fn apply_live(&mut self, cx: &mut Context<Self>) {
         let cfg = self.cfg.clone();
         self.panel.update(cx, |panel, cx| panel.update_config(cfg, cx));
         cx.notify();
@@ -64,6 +84,42 @@ impl Settings {
     fn mutate(&mut self, f: impl FnOnce(&mut Config), cx: &mut Context<Self>) {
         f(&mut self.cfg);
         self.apply(cx);
+    }
+
+    // ---- position fine-tuning drag ----
+
+    fn drag_update(&mut self, pos: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+        match self.dragging {
+            Some(Drag::Slider) => {
+                let Some(b) = self.track_bounds else { return };
+                let usable = (f32::from(b.size.width) - 16.0).max(1.0);
+                let frac = ((f32::from(pos.x) - f32::from(b.origin.x) - 8.0) / usable).clamp(0.0, 1.0);
+                self.cfg.v_pos = Some(frac);
+            }
+            Some(Drag::Preview) => {
+                let Some(b) = self.preview_bounds else { return };
+                let frac = ((f32::from(pos.y) - f32::from(b.origin.y)) / f32::from(b.size.height).max(1.0)).clamp(0.0, 1.0);
+                let left = f32::from(pos.x) < f32::from(b.origin.x) + f32::from(b.size.width) / 2.0;
+                self.cfg.v_pos = Some(frac);
+                self.cfg.position = if left {
+                    Position::LeftCenter
+                } else {
+                    Position::RightCenter
+                };
+            }
+            None => return,
+        }
+        self.apply_live(cx);
+        // show the real panel at the new spot while dragging
+        self.panel.update(cx, |panel, cx| panel.preview_reveal(cx));
+    }
+
+    fn drag_end(&mut self, cx: &mut Context<Self>) {
+        if self.dragging.take().is_some() {
+            let _ = self.cfg.save();
+            self.panel.update(cx, |panel, cx| panel.preview_end(cx));
+            cx.notify();
+        }
     }
 }
 
@@ -308,12 +364,20 @@ impl Settings {
                 .map(|(row_ix, row)| {
                     div().flex().gap(px(6.)).children(row.iter().enumerate().map(
                         |(col_ix, &pos)| {
-                            let active = cfg.position == pos;
+                            let active = cfg.position == pos && cfg.v_pos.is_none();
                             self.chip(
                                 ("pos", row_ix * 3 + col_ix),
                                 pos.label().to_string(),
                                 active,
-                                move |this, cx| this.mutate(|c| c.position = pos, cx),
+                                move |this, cx| {
+                                    this.mutate(
+                                        |c| {
+                                            c.position = pos;
+                                            c.v_pos = None;
+                                        },
+                                        cx,
+                                    )
+                                },
                                 u,
                                 cx,
                             )
@@ -321,6 +385,107 @@ impl Settings {
                     ))
                 }),
         );
+
+        // -- fine-tune slider --
+        let frac = cfg.v_frac();
+        let entity = cx.entity();
+        let track = div()
+            .id("vslider")
+            .flex_1()
+            .h(px(20.))
+            .relative()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                    this.dragging = Some(Drag::Slider);
+                    this.drag_update(ev.position, cx);
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(8.))
+                    .left(px(8.))
+                    .right(px(8.))
+                    .h(px(4.))
+                    .rounded(px(2.))
+                    .bg(rgba(u.row)),
+            )
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            // repaint once with the settled bounds so the
+                            // knob lands on the real track
+                            if this.track_bounds != Some(bounds) {
+                                this.track_bounds = Some(bounds);
+                                cx.notify();
+                            }
+                        })
+                    },
+                    |_, _, _, _| {},
+                )
+                .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(3.))
+                    .left(px(frac * (self.track_bounds.map_or(224.0, |b| f32::from(b.size.width)) - 16.0)))
+                    .w(px(14.))
+                    .h(px(14.))
+                    .rounded(px(7.))
+                    .bg(rgba(u.accent)),
+            );
+
+        // -- mini screen preview --
+        let (pw, ph) = (176.0_f32, 99.0_f32);
+        let bar_h = 30.0_f32;
+        let m = (cfg.margin_px / 1440.0) * ph;
+        let bar_y = m + ((ph - bar_h - 2.0 * m).max(0.0)) * frac;
+        let bar_x = if cfg.position.is_left() { 3.0 } else { pw - 9.0 - 3.0 };
+        let entity = cx.entity();
+        let preview = div()
+            .id("posprev")
+            .w(px(pw))
+            .h(px(ph))
+            .flex_none()
+            .relative()
+            .rounded(px(6.))
+            .bg(rgba(u.row))
+            .border_1()
+            .border_color(rgba(u.row))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                    this.dragging = Some(Drag::Preview);
+                    this.drag_update(ev.position, cx);
+                }),
+            )
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        entity.update(cx, |this, _| {
+                            this.preview_bounds = Some(bounds);
+                        })
+                    },
+                    |_, _, _, _| {},
+                )
+                .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(bar_x))
+                    .top(px(bar_y))
+                    .w(px(9.))
+                    .h(px(bar_h))
+                    .rounded(px(2.))
+                    .bg(rgba(u.accent)),
+            );
+
         div()
             .flex()
             .flex_col()
@@ -351,12 +516,39 @@ impl Settings {
             ))
             .child(div().pt(px(8.)).pb(px(4.)).text_color(rgba(u.text)).child("Position"))
             .child(position_grid)
-            .child(self.hint(
-                "Edge margin keeps top/bottom placements away from the screen \
-                 corner. Alt-Tab always opens centered."
-                    .to_string(),
-                u,
-            ))
+            .child(
+                div()
+                    .pt(px(12.))
+                    .pb(px(4.))
+                    .text_color(rgba(u.text))
+                    .child("Fine-tune"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(14.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .child(div().flex().items_center().gap(px(8.)).child(track).child(
+                                div().w(px(40.)).flex_none().text_size(px(11.)).text_color(rgba(u.dim)).child(
+                                    format!("{}%", (frac * 100.0) as i64),
+                                ),
+                            ))
+                            .child(self.hint(
+                                "Drag the slider — or the panel inside the mini \
+                                 screen — to place it exactly. The real panel \
+                                 previews live while you drag."
+                                    .to_string(),
+                                u,
+                            )),
+                    )
+                    .child(preview),
+            )
     }
 
     fn appearance_pane(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
@@ -513,9 +705,14 @@ impl Render for Settings {
                             cx.notify();
                         }),
                     )
-                    .child(div().w(px(16.)).text_color(rgba(u.dim)).when(selected, |d| {
-                        d.text_color(rgba(u.accent_text))
-                    }).child(icon))
+                    .child(
+                        svg()
+                            .path(icon)
+                            .w(px(14.))
+                            .h(px(14.))
+                            .flex_none()
+                            .text_color(rgba(if selected { u.accent_text } else { u.dim })),
+                    )
                     .child(label)
             }));
 
@@ -539,10 +736,20 @@ impl Render for Settings {
                     .clone()
                     .unwrap_or_else(|| "Liberation Sans".into()),
             )
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if this.dragging.is_some() && ev.pressed_button == Some(MouseButton::Left) {
+                    this.drag_update(ev.position, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.drag_end(cx)),
+            )
             .child(nav)
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.)) // let content wrap instead of overflowing
                     .h_full()
                     .flex()
                     .flex_col()
@@ -569,7 +776,13 @@ impl Render for Settings {
                                             window.remove_window();
                                         }),
                                     )
-                                    .child("✕"),
+                                    .child(
+                                        svg()
+                                            .path("icons/x.svg")
+                                            .w(px(12.))
+                                            .h(px(12.))
+                                            .text_color(rgba(u.dim)),
+                                    ),
                             ),
                     )
                     .child(pane),

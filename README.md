@@ -22,8 +22,10 @@ and hover-reveal at the screen edge. Built in Rust with
   your windows without touching the keyboard. Never steals focus.
 - **Mouse friendly**: hover to highlight, click to switch.
 - **Light/dark themes**, following your system preference by default.
-- **Settings GUI** (`sidetab settings`) with live-applied changes: panel
-  position (six placements), width, hover behavior, delays, theme.
+- **Settings GUI** (`sidetab settings`), laid out like the Contexts
+  preferences: panel width, edge margin, six position presets plus a
+  fine-tune slider with a mini screen preview (the real panel moves live
+  while you drag), hover behavior, delays, theme, and pinned apps.
 
 ## Install
 
@@ -89,7 +91,9 @@ Settings are edited from the GUI (`sidetab settings`) or by hand in
 position = "left-center"   # left-top | left-center | left-bottom
                            # right-top | right-center | right-bottom
 width = 320.0
-margin_px = 24.0           # gap from the screen edge for top/bottom placements
+margin_px = 24.0           # gap kept from the top/bottom screen edges
+# v_pos = 0.37             # fine-tuned position along the edge (0 top .. 1
+                           # bottom); set from the settings slider / preview
 hover_reveal = true
 hover_strip_px = 4.0       # width of the invisible reveal strip
 show_delay_ms = 120
