@@ -6,7 +6,7 @@
 use crate::config::{Config, Edge, SidebarMode, ThemeVariant};
 use crate::ui::panel::Switcher;
 use gpui::{
-    canvas, div, prelude::*, px, rgba, svg, Bounds, Context, Entity, MouseButton,
+    canvas, div, img, prelude::*, px, rgba, svg, Bounds, Context, Entity, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Window,
 };
 
@@ -588,10 +588,17 @@ impl Settings {
         div()
             .flex()
             .flex_col()
+            .items_center()
             .gap(px(6.))
-            .child(self.heading("About", u))
+            .pt(px(20.))
+            .children(
+                crate::icons::app_logo_png(128)
+                    .map(|p| img(p).w(px(64.)).h(px(64.)).flex_none()),
+            )
             .child(
                 div()
+                    .pt(px(8.))
+                    .text_size(px(16.))
                     .text_color(rgba(u.text))
                     .child(format!("Sidetab {}", env!("CARGO_PKG_VERSION"))),
             )
@@ -627,9 +634,19 @@ impl Render for Settings {
                     .px(px(8.))
                     .pt(px(4.))
                     .pb(px(10.))
-                    .text_size(px(14.))
-                    .text_color(rgba(u.text))
-                    .child("Sidetab"),
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .children(
+                        crate::icons::app_logo_png(64)
+                            .map(|p| img(p).w(px(20.)).h(px(20.)).flex_none()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(rgba(u.text))
+                            .child("Sidetab"),
+                    ),
             )
             .children(SECTIONS.iter().enumerate().map(|(ix, &(section, icon, label))| {
                 let selected = active == section;

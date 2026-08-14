@@ -137,9 +137,6 @@ pub fn apply_panel_rules() -> Result<()> {
         // no_focus is tag-scoped so the daemon can lift it for search mode
         // (tagwindow +/- sidetab-nofocus); a class rule could never be lifted.
         "no_focus on, match:tag sidetab-nofocus",
-        // the always-visible sidebar animates its expand/collapse; the tag
-        // overrides the class-wide no_anim above
-        "no_anim off, match:tag sidetab-anim",
         "float on, match:class sidetab-settings",
         "size 620 460, match:class sidetab-settings",
         "center on, match:class sidetab-settings",

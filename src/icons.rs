@@ -9,6 +9,29 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Rasterized copy of sidetab's own app icon, for in-app display
+/// (gpui's svg element renders monochrome masks; the logo is full-color).
+pub fn app_logo_png(size: u32) -> Option<PathBuf> {
+    let cache = dirs::cache_dir()?.join("sidetab/icons");
+    let _ = std::fs::create_dir_all(&cache);
+    let out = cache.join(format!("sidetab-logo-{size}.png"));
+    if out.exists() {
+        return Some(out);
+    }
+    let data = include_bytes!("../assets/sidetab.svg");
+    let tree = resvg::usvg::Tree::from_data(data, &resvg::usvg::Options::default()).ok()?;
+    let svg_size = tree.size();
+    let scale = size as f32 / svg_size.width().max(svg_size.height());
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.save_png(&out).ok()?;
+    Some(out)
+}
+
 pub struct IconResolver {
     /// lowercase desktop-entry key -> Icon= value
     desktop_index: HashMap<String, String>,
