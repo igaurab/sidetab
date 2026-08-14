@@ -22,22 +22,31 @@ anyhow = "1"
 dirs = "6"
 futures = "0.3"
 
+# Measured on this crate (rebuild after an edit / stripped binary size):
+#   thin, 16 CGUs              36s / 20.9 MiB
+#   + panic=abort              37s / 18.2 MiB  <- free
+#   + codegen-units=1          63s / 15.8 MiB  <- worth it for a release build
+#   fat LTO instead of thin   152s / 14.4 MiB  <- 89s more for 1.4 MiB, no
+# Use --profile quick for iteration rather than loosening this.
 [profile.release]
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = true
 
 # Full debuginfo on a GPUI binary costs ~500MB of output and dominates link
-# time on every edit. Line tables are enough for backtraces.
+# time on every edit. Line tables are enough for backtraces, and cut the
+# debug binary from 531MB to 147MB (rebuild after an edit: 2.4s -> 1.9s).
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
-# Release-speed binary without the slow parts of the release profile, for
-# checking real-world performance: cargo build --profile quick
+# Optimized build for checking real-world performance without the release
+# profile's LTO+single-CGU pass: 13s per edit against release's 63s.
+#   cargo build --profile quick
 [profile.quick]
 inherits = "release"
 lto = false
+codegen-units = 16
 strip = false
 debug = "line-tables-only"
