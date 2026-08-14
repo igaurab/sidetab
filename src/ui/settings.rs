@@ -3,7 +3,7 @@
 //! right. Lives in the daemon; every change applies to the panel
 //! immediately and persists to ~/.config/sidetab/config.toml.
 
-use crate::config::{Config, Edge, SidebarMode, ThemeVariant};
+use crate::config::{Config, CycleScope, Edge, ThemeVariant};
 use crate::ui::panel::Switcher;
 use gpui::{
     canvas, div, img, prelude::*, px, rgba, svg, Bounds, Context, Entity, MouseButton,
@@ -12,16 +12,16 @@ use gpui::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
-    General,
     Panel,
+    Shortcuts,
     Appearance,
     PinnedApps,
     About,
 }
 
 const SECTIONS: [(Section, &str, &str); 5] = [
-    (Section::General, "icons/settings.svg", "General"),
     (Section::Panel, "icons/panel.svg", "Panel"),
+    (Section::Shortcuts, "icons/keys.svg", "Shortcuts"),
     (Section::Appearance, "icons/appearance.svg", "Appearance"),
     (Section::PinnedApps, "icons/pin.svg", "Pinned Apps"),
     (Section::About, "icons/info.svg", "About"),
@@ -61,7 +61,7 @@ impl Settings {
         Settings {
             cfg,
             panel,
-            active: Section::General,
+            active: Section::Panel,
             known_apps,
             dragging: None,
             track_bounds: None,
@@ -249,50 +249,68 @@ impl Settings {
             .child(text)
     }
 
-    fn general_pane(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
+    fn scope_chips(
+        &self,
+        id: &'static str,
+        current: CycleScope,
+        set: impl Fn(&mut Config, CycleScope) + Clone + 'static,
+        u: &Ui,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div().flex().gap(px(6.)).children(
+            [
+                (CycleScope::AllWorkspaces, "All workspaces"),
+                (CycleScope::CurrentWorkspace, "Current workspace"),
+                (CycleScope::Disabled, "Disabled"),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (scope, label))| {
+                let set = set.clone();
+                self.chip(
+                    (id, ix),
+                    label.to_string(),
+                    current == scope,
+                    move |this, cx| this.mutate(|c| set(c, scope), cx),
+                    u,
+                    cx,
+                )
+            }),
+        )
+    }
+
+    fn shortcuts_pane(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
         let cfg = self.cfg.clone();
         div()
             .flex()
             .flex_col()
-            .child(self.heading("General", u))
-            .child(div().pb(px(6.)).text_color(rgba(u.text)).child("Sidebar"))
+            .child(self.heading("Shortcuts", u))
+            .child(div().pb(px(6.)).text_color(rgba(u.text)).child("Alt + Tab cycles"))
+            .child(self.scope_chips("alttab", cfg.alt_tab, |c, s| c.alt_tab = s, u, cx))
             .child(
-                div().flex().gap(px(6.)).children(
-                    [
-                        (SidebarMode::RevealOnHover, "Reveal on hover"),
-                        (SidebarMode::AlwaysVisible, "Always visible"),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, (mode, label))| {
-                        self.chip(
-                            ("sidebar", ix),
-                            label.to_string(),
-                            cfg.sidebar == mode,
-                            move |this, cx| this.mutate(|c| c.sidebar = mode, cx),
-                            u,
-                            cx,
-                        )
-                    }),
-                ),
+                div()
+                    .pt(px(14.))
+                    .pb(px(6.))
+                    .text_color(rgba(u.text))
+                    .child("Super + Tab cycles"),
             )
+            .child(self.scope_chips("supertab", cfg.super_tab, |c, s| c.super_tab = s, u, cx))
             .child(self.hint(
-                match cfg.sidebar {
-                    SidebarMode::RevealOnHover => {
-                        "The sidebar stays hidden until your cursor touches the \
-                         screen edge, then slides in and hides again when you \
-                         move away."
-                    }
-                    SidebarMode::AlwaysVisible => {
-                        "A compact sidebar with your app icons and workspace \
-                         headers stays on screen; hovering it expands the full \
-                         panel, like Contexts."
-                    }
-                }
-                .to_string(),
+                "Choose what each shortcut cycles through, or disable it. \
+                 Disabled shortcuts do nothing while sidetab holds the \
+                 binding — remove the bind from your Hyprland config to \
+                 give the key back to something else."
+                    .to_string(),
                 u,
             ))
-            .child(div().pt(px(10.)))
+    }
+
+    fn delays_block(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
+        let cfg = self.cfg.clone();
+        div()
+            .flex()
+            .flex_col()
+            .pt(px(6.))
             .child(self.row(
                 "Show delay",
                 self.stepper(
@@ -377,25 +395,22 @@ impl Settings {
             )
             .child(
                 canvas(
+                    // bounds are only needed to map drag positions
                     move |bounds, _, cx| {
-                        entity.update(cx, |this, cx| {
-                            // repaint once with the settled bounds so the
-                            // knob lands on the real track
-                            if this.track_bounds != Some(bounds) {
-                                this.track_bounds = Some(bounds);
-                                cx.notify();
-                            }
-                        })
+                        entity.update(cx, |this, _| this.track_bounds = Some(bounds))
                     },
                     |_, _, _, _| {},
                 )
                 .size_full(),
             )
             .child(
+                // percentage-positioned so no measured bounds are needed:
+                // at 0% the knob hugs the left end, at 100% the right end
                 div()
                     .absolute()
                     .top(px(3.))
-                    .left(px(frac * (self.track_bounds.map_or(224.0, |b| f32::from(b.size.width)) - 16.0)))
+                    .left(gpui::relative(frac))
+                    .ml(px(-14.0 * frac))
                     .w(px(14.))
                     .h(px(14.))
                     .rounded(px(7.))
@@ -499,6 +514,7 @@ impl Settings {
                     )
                     .child(preview),
             )
+            .child(self.delays_block(u, cx))
     }
 
     fn appearance_pane(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
@@ -684,8 +700,8 @@ impl Render for Settings {
             }));
 
         let pane = match self.active {
-            Section::General => self.general_pane(&u, cx),
             Section::Panel => self.panel_pane(&u, cx),
+            Section::Shortcuts => self.shortcuts_pane(&u, cx),
             Section::Appearance => self.appearance_pane(&u, cx),
             Section::PinnedApps => self.pinned_pane(&u, cx),
             Section::About => self.about_pane(&u),

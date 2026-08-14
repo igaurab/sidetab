@@ -18,9 +18,11 @@ and hover-reveal at the screen edge. Built in Rust with
 - **App icons** resolved from your icon theme (SVG icons rasterized and cached).
 - **Fuzzy search** (`sidetab search`): type to filter windows, Enter to
   switch, digits 1–9 to jump.
-- **Two sidebar modes**: *reveal on hover* (hidden until your cursor touches
-  the screen edge) or *always visible* — a compact Contexts-style sidebar
-  showing icons and workspace headers that smoothly expands on hover.
+- **Hover reveal**: the sidebar stays hidden until your cursor touches the
+  screen edge, then slides in; it never steals your keyboard focus.
+- **Configurable shortcuts**: choose what Alt+Tab and Super+Tab each cycle
+  through (all workspaces, current workspace, or disabled) from settings —
+  no Hyprland config edits needed to swap behaviors.
 - **Mouse friendly**: hover to highlight, click to switch.
 - **Light/dark themes**, following your system preference by default.
 - **Settings GUI** (`sidetab settings`), laid out like the Contexts
@@ -101,8 +103,8 @@ edge = "left"              # left | right
 width = 320.0
 v_pos = 0.5                # placement along the edge, 0.0 top .. 1.0 bottom
                            # (set it visually from the settings slider/preview)
-sidebar = "reveal-on-hover" # reveal-on-hover | always-visible (compact
-                           # icon sidebar stays on screen, hover expands it)
+alt_tab = "all-workspaces"      # all-workspaces | current-workspace | disabled
+super_tab = "current-workspace" # what each cycling shortcut shows
 hover_strip_px = 4.0       # hover target width while hidden (no GUI control)
 show_delay_ms = 120
 hide_delay_ms = 300

@@ -138,7 +138,7 @@ pub fn apply_panel_rules() -> Result<()> {
         // (tagwindow +/- sidetab-nofocus); a class rule could never be lifted.
         "no_focus on, match:tag sidetab-nofocus",
         "float on, match:class sidetab-settings",
-        "size 620 460, match:class sidetab-settings",
+        "size 620 600, match:class sidetab-settings",
         "center on, match:class sidetab-settings",
     ];
     batch(

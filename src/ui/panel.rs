@@ -1,25 +1,18 @@
 //! The switcher panel: a Contexts-style sidebar. Owns the presence state
 //! machine — every reveal/hide/focus transition funnels through here.
 
-use crate::config::{Config, Palette, SidebarMode};
+use crate::config::{Config, CycleScope, Palette};
 use crate::daemon::Msg;
 use crate::hypr::ctl;
 use crate::hypr::events::HyprEvent;
 use crate::icons::IconResolver;
 use crate::windows::{self, Group, WinEntry};
 use gpui::{
-    div, ease_in_out, img, prelude::*, px, rgba, Animation, AnimationExt as _, Context,
-    FocusHandle, KeyDownEvent, MouseButton, Window,
+    div, img, prelude::*, px, rgba, Context, FocusHandle, KeyDownEvent, MouseButton, Window,
 };
 use std::time::Duration;
 
 pub const NOFOCUS_TAG: &str = "sidetab-nofocus";
-
-/// Visible width of the collapsed always-visible sidebar: enough for the
-/// row icons and the first few characters, like Contexts' collapsed state.
-const COMPACT_PX: f64 = 76.0;
-/// Duration of the client-side expand/collapse tween.
-const CARD_ANIM_MS: u64 = 160;
 
 const ROW_H: f32 = 26.0;
 const GROUP_HEADER_H: f32 = 24.0;
@@ -65,11 +58,6 @@ pub struct Switcher {
     address: Option<String>,
     fullscreen_active: bool,
     dirty: bool,
-    /// active content-card width tween (from, to)
-    card_anim: Option<(f32, f32)>,
-    anim_gen: u64,
-    /// the real window is currently at compact width
-    compact_window: bool,
     /// the current reveal came from edge hover (auto-hides on leave)
     hover_originated: bool,
     /// consecutive polls with the cursor outside the revealed panel
@@ -113,9 +101,6 @@ impl Switcher {
             address: None,
             fullscreen_active: ctl::active_window_fullscreen(),
             dirty: true,
-            card_anim: None,
-            anim_gen: 0,
-            compact_window: false,
             hover_originated: false,
             outside_polls: 0,
             hover_armed: true,
@@ -137,10 +122,6 @@ impl Switcher {
         self.rest(cx);
     }
 
-    fn always_visible(&self) -> bool {
-        self.cfg.sidebar == SidebarMode::AlwaysVisible
-    }
-
     fn set_nofocus(&self, on: bool) {
         if let Some(addr) = &self.address {
             let sign = if on { '+' } else { '-' };
@@ -148,31 +129,6 @@ impl Switcher {
         }
     }
 
-    /// Kick off a client-side width tween of the content card. Hyprland
-    /// never animates our window (that leaves black residue where the
-    /// buffer doesn't cover the animated frame); instead gpui animates the
-    /// card and the real window is resized instantly at the ends.
-    fn start_card_anim(&mut self, from: f32, to: f32, resize_after: bool, cx: &mut Context<Self>) {
-        self.anim_gen += 1;
-        let generation = self.anim_gen;
-        self.card_anim = Some((from, to));
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(CARD_ANIM_MS + 30))
-                .await;
-            this.update(cx, |this, cx| {
-                if this.anim_gen == generation {
-                    this.card_anim = None;
-                    if resize_after {
-                        this.place(false);
-                    }
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
 
     // ---- data ----
 
@@ -298,37 +254,11 @@ impl Switcher {
             return;
         };
         let (x_shown, x_hidden, y, w, h) = self.geometry(&mon);
-        // resting state in always-visible mode: a narrow panel at the edge
-        // showing icons + a few characters (Contexts' collapsed sidebar),
-        // resized rather than slid so the icon column stays visible
-        let (x, w, compact) = if revealed {
-            (x_shown, w, false)
-        } else if self.always_visible() && !self.fullscreen_active {
-            let (mw, _) = mon.logical_size();
-            let cw = COMPACT_PX as i64;
-            let x = if self.cfg.edge.is_left() {
-                mon.x
-            } else {
-                mon.x + mw as i64 - cw
-            };
-            (x, cw, true)
-        } else {
-            (x_hidden, w, false)
-        };
-        self.compact_window = compact;
+        let x = if revealed { x_shown } else { x_hidden };
         let _ = ctl::batch(&[
             format!("dispatch resizewindowpixel exact {w} {h},address:{addr}"),
             format!("dispatch movewindowpixel exact {x} {y},address:{addr}"),
         ]);
-    }
-
-    /// True while resting as the narrow always-visible sidebar. During the
-    /// collapse tween this stays false so the content keeps its full
-    /// styling and is clipped smoothly instead of reflowing mid-animation.
-    fn compact(&self) -> bool {
-        self.always_visible()
-            && matches!(self.mode, Mode::Hidden | Mode::HoverPending)
-            && self.card_anim.is_none()
     }
 
     fn park(&mut self) {
@@ -342,13 +272,7 @@ impl Switcher {
             self.refresh();
         }
         self.palette = self.cfg.theme.palette();
-        // expanding the compact sidebar tweens the card; the centered
-        // cycling overlay pops instantly
-        let animate = self.compact_window && !self.centered();
         self.place(true);
-        if animate {
-            self.start_card_anim(COMPACT_PX as f32, self.cfg.width, false, cx);
-        }
         // visible panels must receive pointer input (hover + clicks),
         // which Hyprland withholds from no_focus windows
         self.set_nofocus(false);
@@ -387,23 +311,7 @@ impl Switcher {
     /// that parks nearly offscreen; in always-visible mode the same park
     /// leaves the compact sidebar (icons + workspace headers) showing.
     fn rest(&mut self, cx: &mut Context<Self>) {
-        if self.always_visible() && !self.fullscreen_active {
-            let was_expanded = !self.compact_window;
-            self.set_nofocus(true);
-            self.mode = Mode::Hidden;
-            self.end_interaction();
-            self.refresh();
-            self.selected = self.mru_position();
-            if was_expanded {
-                // tween the card down first; the window shrinks afterwards
-                self.start_card_anim(self.cfg.width, COMPACT_PX as f32, true, cx);
-            } else {
-                self.place(false);
-            }
-            cx.notify();
-        } else {
-            self.hide_now(cx);
-        }
+        self.hide_now(cx);
     }
 
     /// Cursor watcher, since gpui cannot always see enter/leave here:
@@ -423,11 +331,7 @@ impl Switcher {
                     return;
                 };
                 let (_, _, y, _, h) = self.geometry(&mon);
-                let zone = if self.always_visible() {
-                    COMPACT_PX + 2.0
-                } else {
-                    (self.cfg.hover_strip_px as f64).max(6.0)
-                };
+                let zone = (self.cfg.hover_strip_px as f64).max(6.0);
                 let (mw, _) = mon.logical_size();
                 let in_strip = cur_y >= y as f64
                     && cur_y <= (y + h) as f64
@@ -462,17 +366,6 @@ impl Switcher {
                 }
             }
             _ => {}
-        }
-    }
-
-    /// In always-visible mode the parked panel's compact strip is on
-    /// screen, so its list must stay current even while "hidden".
-    fn refresh_compact(&mut self, cx: &mut Context<Self>) {
-        if self.always_visible() && self.mode == Mode::Hidden && self.card_anim.is_none() {
-            self.refresh();
-            self.selected = self.mru_position();
-            self.place(false);
-            cx.notify();
         }
     }
 
@@ -567,10 +460,17 @@ impl Switcher {
         match cmd {
             "next" | "prev" | "next-ws" | "prev-ws" => {
                 let delta: i64 = if cmd.starts_with("next") { 1 } else { -1 };
-                let scope = if cmd.ends_with("-ws") {
-                    Scope::Workspace
+                // each shortcut's scope is user-configurable (Shortcuts
+                // section in settings); Disabled swallows the command
+                let behavior = if cmd.ends_with("-ws") {
+                    self.cfg.super_tab
                 } else {
-                    Scope::All
+                    self.cfg.alt_tab
+                };
+                let scope = match behavior {
+                    CycleScope::AllWorkspaces => Scope::All,
+                    CycleScope::CurrentWorkspace => Scope::Workspace,
+                    CycleScope::Disabled => return,
                 };
                 if self.mode == Mode::Search
                     || (self.mode == Mode::Cycling && self.scope == scope)
@@ -636,10 +536,7 @@ impl Switcher {
                 }
             }
             HyprEvent::WindowsChanged => match self.mode {
-                Mode::Hidden | Mode::HoverPending => {
-                    self.dirty = true;
-                    self.refresh_compact(cx);
-                }
+Mode::Hidden | Mode::HoverPending => self.dirty = true,
                 Mode::Revealed | Mode::Search => {
                     let keep = self.selected_entry().map(|e| e.address.clone());
                     self.refresh();
@@ -662,7 +559,6 @@ impl Switcher {
                 if self.mode == Mode::Hidden {
                     self.dirty = true;
                     self.park();
-                    self.refresh_compact(cx);
                 }
             }
             HyprEvent::FullscreenChanged(active) => {
@@ -839,7 +735,7 @@ impl Switcher {
         };
         let icon = self.icons.resolve(&entry.class, &entry.initial_class);
         let address = entry.address.clone();
-        let show_digit = position < 9 && !self.searching() && !self.compact();
+        let show_digit = position < 9 && !self.searching();
 
         div()
             .id(("row", entry_ix))
@@ -899,7 +795,6 @@ impl Render for Switcher {
         let p = self.palette;
         let left = self.cfg.edge.is_left();
         let searching = self.searching();
-        let compact = self.compact();
 
         // no scrolling: the window is always sized to fit every row
         let mut list = div().flex_1().flex().flex_col().px(px(8.));
@@ -945,11 +840,7 @@ impl Render for Switcher {
                         .pb(px(3.))
                         .text_size(px(11.))
                         .text_color(rgba(p.dim_text))
-                        .child(if compact {
-                            windows::short_group_label(&g.label)
-                        } else {
-                            g.label.clone()
-                        }),
+                        .child(g.label.clone()),
                 );
                 for entry_ix in g.rows {
                     list = list.child(self.render_row(pos, entry_ix, cx));
@@ -1003,7 +894,7 @@ impl Render for Switcher {
                             },
                         ))
                     })
-                    .when(self.mode != Mode::Search && !self.compact(), |d| {
+                    .when(self.mode != Mode::Search, |d| {
                         d.child(
                             div()
                                 .id("gear")
@@ -1028,23 +919,6 @@ impl Render for Switcher {
                     }),
             )
             .child(list);
-
-        // The card tweens its width during compact<->full transitions while
-        // the real window is resized instantly at the endpoints — Hyprland
-        // animating our window leaves black residue, gpui doesn't.
-        let outer = div()
-            .size_full()
-            .flex()
-            .when(!left, |d| d.justify_end());
-        match self.card_anim {
-            Some((from, to)) => outer
-                .child(card.with_animation(
-                    ("card-anim", self.anim_gen as usize),
-                    Animation::new(Duration::from_millis(CARD_ANIM_MS)).with_easing(ease_in_out),
-                    move |card, t| card.w(px(from + (to - from) * t)),
-                ))
-                .into_any_element(),
-            None => outer.child(card.w_full()).into_any_element(),
-        }
+        card.w_full()
     }
 }

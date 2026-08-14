@@ -15,14 +15,15 @@ impl Edge {
     }
 }
 
-/// How the docked sidebar behaves when you're not interacting with it.
+/// What a cycling shortcut (Alt+Tab / Super+Tab) shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum SidebarMode {
-    /// Panel stays on the screen edge permanently, like Contexts' sidebar.
-    AlwaysVisible,
-    /// Panel hides off-screen and slides in when the cursor hits the edge.
-    RevealOnHover,
+pub enum CycleScope {
+    AllWorkspaces,
+    CurrentWorkspace,
+    /// The shortcut does nothing (remove the Hyprland binding to fully
+    /// return the key to other uses).
+    Disabled,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -142,7 +143,10 @@ pub struct Config {
     pub width: f32,
     /// Placement along the edge, 0.0 (top) to 1.0 (bottom).
     pub v_pos: f32,
-    pub sidebar: SidebarMode,
+    /// What `sidetab next/prev` (bound to Alt+Tab) cycles through.
+    pub alt_tab: CycleScope,
+    /// What `sidetab next-ws/prev-ws` (bound to Super+Tab) cycles through.
+    pub super_tab: CycleScope,
     /// Width of the hover-target sliver left visible while hidden
     /// (not exposed in the GUI).
     pub hover_strip_px: f32,
@@ -161,7 +165,8 @@ impl Default for Config {
             edge: Edge::Left,
             width: 320.0,
             v_pos: 0.5,
-            sidebar: SidebarMode::RevealOnHover,
+            alt_tab: CycleScope::AllWorkspaces,
+            super_tab: CycleScope::CurrentWorkspace,
             hover_strip_px: 4.0,
             show_delay_ms: 120,
             hide_delay_ms: 300,

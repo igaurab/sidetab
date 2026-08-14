@@ -127,19 +127,6 @@ pub fn filter(entries: &[WinEntry], query: &str) -> Vec<usize> {
     scored.into_iter().map(|(_, i)| i).collect()
 }
 
-/// Compact-sidebar section label: "Workspace 3" -> "3", short words for
-/// the special groups.
-pub fn short_group_label(label: &str) -> String {
-    if let Some(n) = label.strip_prefix("Workspace ") {
-        return n.to_string();
-    }
-    match label {
-        "Full Screen" => "Full".to_string(),
-        "Floating" => "Float".to_string(),
-        _ => label.to_string(),
-    }
-}
-
 /// Nice app display name from a window class ("org.mozilla.firefox" -> "Firefox").
 pub fn app_name(class: &str) -> String {
     let last = class.rsplit('.').next().unwrap_or(class);
