@@ -21,7 +21,7 @@ enum Section {
 
 const SECTIONS: [(Section, &str, &str); 5] = [
     (Section::Panel, "icons/panel.svg", "Panel"),
-    (Section::Shortcuts, "icons/keys.svg", "Shortcuts"),
+    (Section::Shortcuts, "icons/keys.svg", "Switching"),
     (Section::Appearance, "icons/appearance.svg", "Appearance"),
     (Section::PinnedApps, "icons/pin.svg", "Pinned Apps"),
     (Section::About, "icons/info.svg", "About"),
@@ -284,7 +284,7 @@ impl Settings {
         div()
             .flex()
             .flex_col()
-            .child(self.heading("Shortcuts", u))
+            .child(self.heading("Switching", u))
             .child(div().pb(px(6.)).text_color(rgba(u.text)).child("Alt + Tab cycles"))
             .child(self.scope_chips("alttab", cfg.alt_tab, |c, s| c.alt_tab = s, u, cx))
             .child(
