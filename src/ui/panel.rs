@@ -1,0 +1,750 @@
+//! The switcher panel: a Contexts-style sidebar. Owns the presence state
+//! machine — every reveal/hide/focus transition funnels through here.
+
+use crate::config::{Config, Palette};
+use crate::daemon::Msg;
+use crate::hypr::ctl;
+use crate::hypr::events::HyprEvent;
+use crate::icons::IconResolver;
+use crate::windows::{self, Group, WinEntry};
+use gpui::{
+    div, img, prelude::*, px, rgba, Context, FocusHandle, KeyDownEvent, MouseButton, ScrollHandle,
+    Window,
+};
+use std::time::Duration;
+
+pub const NOFOCUS_TAG: &str = "sidetab-nofocus";
+
+const ROW_H: f32 = 26.0;
+const GROUP_HEADER_H: f32 = 24.0;
+const PANEL_HEADER_H: f32 = 30.0;
+const PAD_V: f32 = 10.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Hidden,
+    /// Mouse is on the edge strip; reveal scheduled.
+    HoverPending,
+    /// Visible without keyboard focus (hover or `toggle`).
+    Revealed,
+    /// Alt is held; visible (or reveal pending), driven by next/prev/commit.
+    Cycling,
+    /// Keyboard-focused with a search field.
+    Search,
+}
+
+pub struct Switcher {
+    cfg: Config,
+    palette: Palette,
+    entries: Vec<WinEntry>,
+    groups: Vec<Group>,
+    /// entry indices in on-screen order (group by group)
+    order: Vec<usize>,
+    /// entry indices when a search query is active
+    filtered: Vec<usize>,
+    query: String,
+    /// position within the current visible order
+    selected: usize,
+    mode: Mode,
+    /// our own Hyprland window address (discovered after mapping)
+    address: Option<String>,
+    fullscreen_active: bool,
+    dirty: bool,
+    reveal_gen: u64,
+    hide_gen: u64,
+    icons: IconResolver,
+    pub focus_handle: FocusHandle,
+    scroll: ScrollHandle,
+}
+
+impl Switcher {
+    pub fn new(cfg: Config, cx: &mut Context<Self>) -> Self {
+        let palette = cfg.theme.palette();
+        Switcher {
+            cfg,
+            palette,
+            entries: Vec::new(),
+            groups: Vec::new(),
+            order: Vec::new(),
+            filtered: Vec::new(),
+            query: String::new(),
+            selected: 0,
+            mode: Mode::Hidden,
+            address: None,
+            fullscreen_active: ctl::active_window_fullscreen(),
+            dirty: true,
+            reveal_gen: 0,
+            hide_gen: 0,
+            icons: IconResolver::new(),
+            focus_handle: cx.focus_handle(),
+            scroll: ScrollHandle::new(),
+        }
+    }
+
+    pub fn set_address(&mut self, address: String, cx: &mut Context<Self>) {
+        self.address = Some(address.clone());
+        let _ = ctl::dispatch(&format!("tagwindow +{NOFOCUS_TAG} address:{address}"));
+        self.park();
+        cx.notify();
+    }
+
+    // ---- data ----
+
+    fn refresh(&mut self) {
+        self.entries = windows::fetch();
+        self.groups = windows::group(&self.entries);
+        self.order = windows::display_order(&self.groups);
+        self.dirty = false;
+        if !self.query.is_empty() {
+            self.filtered = windows::filter(&self.entries, &self.query);
+        }
+        let len = self.visible_order().len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
+    fn visible_order(&self) -> &[usize] {
+        if self.searching() {
+            &self.filtered
+        } else {
+            &self.order
+        }
+    }
+
+    fn searching(&self) -> bool {
+        self.mode == Mode::Search && !self.query.is_empty()
+    }
+
+    fn selected_entry(&self) -> Option<&WinEntry> {
+        self.visible_order()
+            .get(self.selected)
+            .map(|&i| &self.entries[i])
+    }
+
+    /// Display position of the most-recently-used *other* window.
+    fn mru_position(&self) -> usize {
+        let target = self
+            .entries
+            .iter()
+            .filter(|e| e.focus_history_id != 0)
+            .min_by_key(|e| e.focus_history_id)
+            .map(|e| e.address.clone());
+        match target {
+            Some(addr) => self
+                .order
+                .iter()
+                .position(|&i| self.entries[i].address == addr)
+                .unwrap_or(0),
+            None => 0,
+        }
+    }
+
+    // ---- geometry ----
+
+    fn monitor(&self) -> Option<ctl::Monitor> {
+        ctl::focused_monitor().ok()
+    }
+
+    fn content_height(&self) -> f32 {
+        let mut h = PAD_V * 2.0 + PANEL_HEADER_H;
+        if self.searching() {
+            h += self.filtered.len().max(1) as f32 * ROW_H;
+        } else {
+            for g in &self.groups {
+                h += GROUP_HEADER_H + g.rows.len() as f32 * ROW_H;
+            }
+            if self.groups.is_empty() {
+                h += ROW_H;
+            }
+        }
+        h
+    }
+
+    /// (revealed_x, hidden_x, y, w, h) in Hyprland logical layout coords.
+    fn geometry(&self, mon: &ctl::Monitor) -> (i64, i64, i64, i64, i64) {
+        let (mw, mh) = mon.logical_size();
+        let w = self.cfg.width as f64;
+        let h = (self.content_height() as f64).min(mh * self.cfg.max_height_frac as f64);
+        let strip = if self.cfg.hover_reveal && !self.fullscreen_active {
+            self.cfg.hover_strip_px as f64
+        } else {
+            -8.0 // park fully offscreen
+        };
+        let (x_shown, x_hidden) = if self.cfg.position.is_left() {
+            (mon.x as f64, mon.x as f64 - w + strip)
+        } else {
+            (
+                mon.x as f64 + mw - w,
+                mon.x as f64 + mw - strip,
+            )
+        };
+        let y = mon.y as f64 + (mh - h) * self.cfg.position.v_align() as f64;
+        (x_shown as i64, x_hidden as i64, y as i64, w as i64, h as i64)
+    }
+
+    fn place(&self, revealed: bool) {
+        let (Some(addr), Some(mon)) = (self.address.as_ref(), self.monitor()) else {
+            return;
+        };
+        let (x_shown, x_hidden, y, w, h) = self.geometry(&mon);
+        let x = if revealed { x_shown } else { x_hidden };
+        let _ = ctl::batch(&[
+            format!("dispatch resizewindowpixel exact {w} {h},address:{addr}"),
+            format!("dispatch movewindowpixel exact {x} {y},address:{addr}"),
+        ]);
+    }
+
+    fn park(&self) {
+        self.place(false);
+    }
+
+    // ---- presence transitions ----
+
+    fn reveal_now(&mut self, cx: &mut Context<Self>) {
+        if self.dirty {
+            self.refresh();
+        }
+        self.palette = self.cfg.theme.palette();
+        self.place(true);
+        cx.notify();
+    }
+
+    fn hide_now(&mut self, cx: &mut Context<Self>) {
+        if self.mode == Mode::Search {
+            if let Some(addr) = &self.address {
+                let _ = ctl::dispatch(&format!("tagwindow +{NOFOCUS_TAG} address:{addr}"));
+            }
+        }
+        self.mode = Mode::Hidden;
+        self.query.clear();
+        self.filtered.clear();
+        self.reveal_gen += 1; // cancel pending reveals
+        self.hide_gen += 1;
+        self.dirty = true;
+        self.park();
+        cx.notify();
+    }
+
+    fn schedule_reveal(&mut self, delay_ms: u64, cx: &mut Context<Self>) {
+        self.reveal_gen += 1;
+        let generation = self.reveal_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(delay_ms))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.reveal_gen == generation
+                    && matches!(this.mode, Mode::HoverPending | Mode::Cycling)
+                {
+                    if this.mode == Mode::HoverPending {
+                        this.mode = Mode::Revealed;
+                    }
+                    this.reveal_now(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn schedule_hide(&mut self, delay_ms: u64, cx: &mut Context<Self>) {
+        self.hide_gen += 1;
+        let generation = self.hide_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(delay_ms))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.hide_gen == generation && this.mode == Mode::Revealed {
+                    this.hide_now(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn focus_selected_and_hide(&mut self, cx: &mut Context<Self>) {
+        if let Some(entry) = self.selected_entry() {
+            let _ = ctl::focus_window(&entry.address);
+        }
+        self.hide_now(cx);
+    }
+
+    fn step(&mut self, delta: i64, cx: &mut Context<Self>) {
+        let len = self.visible_order().len();
+        if len == 0 {
+            return;
+        }
+        self.selected = ((self.selected as i64 + delta).rem_euclid(len as i64)) as usize;
+        self.scroll.scroll_to_item(self.scroll_index(self.selected));
+        cx.notify();
+    }
+
+    /// Child index of a display position inside the scroll container
+    /// (group headers occupy child slots too).
+    fn scroll_index(&self, position: usize) -> usize {
+        if self.searching() {
+            return position;
+        }
+        let mut child = 0;
+        let mut seen = 0;
+        for g in &self.groups {
+            child += 1; // header
+            if position < seen + g.rows.len() {
+                return child + (position - seen);
+            }
+            seen += g.rows.len();
+            child += g.rows.len();
+        }
+        child
+    }
+
+    // ---- external messages ----
+
+    pub fn handle_msg(&mut self, msg: Msg, window: &mut Window, cx: &mut Context<Self>) {
+        match msg {
+            Msg::Cmd(cmd) => self.handle_cmd(&cmd, window, cx),
+            Msg::Event(ev) => self.handle_event(ev, cx),
+        }
+    }
+
+    fn handle_cmd(&mut self, cmd: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match cmd {
+            "next" | "prev" => {
+                let delta: i64 = if cmd == "next" { 1 } else { -1 };
+                if self.mode == Mode::Cycling || self.mode == Mode::Search {
+                    self.step(delta, cx);
+                } else {
+                    self.refresh();
+                    self.mode = Mode::Cycling;
+                    self.selected = if delta > 0 {
+                        self.mru_position()
+                    } else {
+                        self.order.len().saturating_sub(1)
+                    };
+                    self.schedule_reveal(self.cfg.show_delay_ms, cx);
+                }
+            }
+            "commit" => {
+                if self.mode == Mode::Cycling {
+                    self.focus_selected_and_hide(cx);
+                }
+            }
+            "toggle" => {
+                if self.mode == Mode::Hidden {
+                    self.handle_cmd("show", window, cx);
+                } else {
+                    self.hide_now(cx);
+                }
+            }
+            "show" => {
+                self.refresh();
+                self.mode = Mode::Revealed;
+                self.selected = self.mru_position();
+                self.reveal_now(cx);
+            }
+            "hide" => self.hide_now(cx),
+            "search" => {
+                self.refresh();
+                self.mode = Mode::Search;
+                self.query.clear();
+                self.selected = self.mru_position();
+                self.reveal_now(cx);
+                if let Some(addr) = &self.address {
+                    let _ = ctl::batch(&[
+                        format!("dispatch tagwindow -{NOFOCUS_TAG} address:{addr}"),
+                        format!("dispatch focuswindow address:{addr}"),
+                    ]);
+                }
+                window.focus(&self.focus_handle);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_event(&mut self, ev: HyprEvent, cx: &mut Context<Self>) {
+        match ev {
+            HyprEvent::ConfigReloaded => {
+                let _ = ctl::apply_panel_rules();
+                if let Some(addr) = &self.address {
+                    if self.mode != Mode::Search {
+                        let _ = ctl::dispatch(&format!("tagwindow +{NOFOCUS_TAG} address:{addr}"));
+                    }
+                }
+                if self.mode == Mode::Hidden {
+                    self.park();
+                } else {
+                    self.place(true);
+                }
+            }
+            HyprEvent::WindowsChanged => match self.mode {
+                Mode::Hidden | Mode::HoverPending => self.dirty = true,
+                Mode::Revealed | Mode::Search => {
+                    let keep = self.selected_entry().map(|e| e.address.clone());
+                    self.refresh();
+                    if let Some(addr) = keep {
+                        if let Some(pos) = self
+                            .visible_order()
+                            .iter()
+                            .position(|&i| self.entries[i].address == addr)
+                        {
+                            self.selected = pos;
+                        }
+                    }
+                    self.place(true);
+                    cx.notify();
+                }
+                Mode::Cycling => {}
+            },
+            HyprEvent::ActiveWindowChanged => {
+                self.fullscreen_active = ctl::active_window_fullscreen();
+                if self.mode == Mode::Hidden {
+                    self.dirty = true;
+                    self.park();
+                }
+            }
+            HyprEvent::FullscreenChanged(active) => {
+                self.fullscreen_active = active;
+                if self.mode == Mode::Hidden {
+                    self.park();
+                }
+            }
+            HyprEvent::WindowTitle { address } => {
+                if let Some(e) = self.entries.iter_mut().find(|e| e.address == address) {
+                    if let Ok(clients) = ctl::clients() {
+                        if let Some(c) = clients.into_iter().find(|c| c.address == address) {
+                            e.title = c.title;
+                        }
+                    }
+                    if self.mode != Mode::Hidden {
+                        cx.notify();
+                    }
+                } else {
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    // ---- input ----
+
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != Mode::Search {
+            return;
+        }
+        let key = ev.keystroke.key.as_str();
+        match key {
+            "escape" => self.hide_now(cx),
+            "enter" => self.focus_selected_and_hide(cx),
+            "down" => self.step(1, cx),
+            "up" => self.step(-1, cx),
+            "tab" => {
+                if ev.keystroke.modifiers.shift {
+                    self.step(-1, cx)
+                } else {
+                    self.step(1, cx)
+                }
+            }
+            "backspace" => {
+                self.query.pop();
+                self.apply_query(cx);
+            }
+            _ => {
+                if let Some(ch) = ev
+                    .keystroke
+                    .key_char
+                    .as_ref()
+                    .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+                {
+                    if self.query.is_empty() {
+                        if let Some(d) = ch.chars().next().and_then(|c| c.to_digit(10)) {
+                            if d >= 1 && (d as usize) <= self.order.len().min(9) {
+                                self.selected = d as usize - 1;
+                                self.focus_selected_and_hide(cx);
+                                return;
+                            }
+                        }
+                    }
+                    self.query.push_str(ch);
+                    self.apply_query(cx);
+                }
+            }
+        }
+        let _ = window;
+    }
+
+    fn apply_query(&mut self, cx: &mut Context<Self>) {
+        self.filtered = if self.query.is_empty() {
+            Vec::new()
+        } else {
+            windows::filter(&self.entries, &self.query)
+        };
+        self.selected = 0;
+        self.scroll.scroll_to_item(0);
+        cx.notify();
+    }
+
+    fn on_hover_change(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.hide_gen += 1; // cancel pending hides
+            if self.mode == Mode::Hidden && self.cfg.hover_reveal && !self.fullscreen_active {
+                self.mode = Mode::HoverPending;
+                self.schedule_reveal(self.cfg.show_delay_ms, cx);
+            }
+        } else {
+            match self.mode {
+                Mode::HoverPending => {
+                    self.mode = Mode::Hidden;
+                    self.reveal_gen += 1;
+                }
+                Mode::Revealed => self.schedule_hide(self.cfg.hide_delay_ms, cx),
+                _ => {}
+            }
+        }
+    }
+
+    // ---- config (settings window will call this) ----
+
+    pub fn update_config(&mut self, cfg: Config, cx: &mut Context<Self>) {
+        self.cfg = cfg;
+        self.palette = self.cfg.theme.palette();
+        if self.mode == Mode::Hidden {
+            self.park();
+        } else {
+            self.place(true);
+        }
+        cx.notify();
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    // ---- render helpers ----
+
+    fn letter_tile(&self, entry: &WinEntry) -> gpui::Div {
+        let name = windows::app_name(&entry.class);
+        let letter = name.chars().next().unwrap_or('?').to_string();
+        let hash: u32 = entry
+            .class
+            .bytes()
+            .fold(5381u32, |h, b| h.wrapping_mul(33).wrapping_add(b as u32));
+        let hue = (hash % 360) as f32 / 360.0;
+        div()
+            .w(px(18.))
+            .h(px(18.))
+            .flex_none()
+            .rounded(px(4.))
+            .bg(gpui::hsla(hue, 0.55, 0.5, 1.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(11.))
+            .text_color(gpui::white())
+            .child(letter)
+    }
+
+    fn render_row(
+        &self,
+        position: usize,
+        entry_ix: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let entry = &self.entries[entry_ix];
+        let selected = position == self.selected;
+        let p = self.palette;
+        let title = if entry.title.is_empty() {
+            windows::app_name(&entry.class)
+        } else {
+            entry.title.clone()
+        };
+        let icon = self.icons.resolve(&entry.class, &entry.initial_class);
+        let address = entry.address.clone();
+        let show_digit = position < 9 && !self.searching();
+
+        div()
+            .id(("row", entry_ix))
+            .h(px(ROW_H))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .rounded(px(5.))
+            .when(selected, |d| {
+                d.bg(rgba(p.accent)).text_color(rgba(p.accent_text))
+            })
+            .child(match icon {
+                Some(path) => img(path).w(px(18.)).h(px(18.)).flex_none().into_any_element(),
+                None => self.letter_tile(entry).into_any_element(),
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(title),
+            )
+            .when(show_digit, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.))
+                        .text_color(if selected {
+                            rgba(p.accent_text)
+                        } else {
+                            rgba(p.dim_text)
+                        })
+                        .child(format!("{}", position + 1)),
+                )
+            })
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                if this.selected != position && this.mode != Mode::Cycling {
+                    this.selected = position;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    let _ = ctl::focus_window(&address);
+                    this.hide_now(cx);
+                }),
+            )
+    }
+}
+
+impl Render for Switcher {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        let left = self.cfg.position.is_left();
+        let searching = self.searching();
+
+        let mut list = div()
+            .id("list")
+            .flex_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .flex()
+            .flex_col()
+            .px(px(8.));
+
+        if searching {
+            if self.filtered.is_empty() {
+                list = list.child(
+                    div()
+                        .h(px(ROW_H))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .text_color(rgba(p.dim_text))
+                        .child("No matches"),
+                );
+            } else {
+                let rows: Vec<usize> = self.filtered.clone();
+                for (pos, entry_ix) in rows.into_iter().enumerate() {
+                    list = list.child(self.render_row(pos, entry_ix, cx));
+                }
+            }
+        } else if self.groups.is_empty() {
+            list = list.child(
+                div()
+                    .h(px(ROW_H))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .text_color(rgba(p.dim_text))
+                    .child("No windows"),
+            );
+        } else {
+            let groups = self.groups.clone();
+            let mut pos = 0;
+            for g in groups {
+                list = list.child(
+                    div()
+                        .h(px(GROUP_HEADER_H))
+                        .flex_none()
+                        .px(px(8.))
+                        .flex()
+                        .items_end()
+                        .pb(px(3.))
+                        .text_size(px(11.))
+                        .text_color(rgba(p.dim_text))
+                        .child(g.label.clone()),
+                );
+                for entry_ix in g.rows {
+                    list = list.child(self.render_row(pos, entry_ix, cx));
+                    pos += 1;
+                }
+            }
+        }
+
+        div()
+            .id("root")
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                this.on_key(ev, window, cx)
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.on_hover_change(*hovered, cx)
+            }))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgba(p.background))
+            .border_1()
+            .border_color(rgba(p.border))
+            .when(left, |d| d.rounded_r(px(10.)))
+            .when(!left, |d| d.rounded_l(px(10.)))
+            .pt(px(PAD_V))
+            .pb(px(PAD_V))
+            .text_size(px(13.))
+            .text_color(rgba(p.text))
+            .font_family(self.cfg.font.clone().unwrap_or_else(|| "Liberation Sans".into()))
+            .child(
+                div()
+                    .h(px(PANEL_HEADER_H))
+                    .flex_none()
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.))
+                    .text_color(rgba(p.dim_text))
+                    .child(div().flex_1().child("Apps"))
+                    // in search mode the typed query lives quietly in the
+                    // header instead of a dedicated input box
+                    .when(self.mode == Mode::Search, |d| {
+                        d.child(div().flex_none().text_color(rgba(p.text)).child(
+                            if self.query.is_empty() {
+                                "type to filter".to_string()
+                            } else {
+                                format!("{}▏", self.query)
+                            },
+                        ))
+                    })
+                    .when(self.mode != Mode::Search, |d| {
+                        d.child(
+                            div()
+                                .id("gear")
+                                .flex_none()
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|_, _, _, _| {
+                                        // routed through the control socket so the
+                                        // daemon pump owns the settings window
+                                        let _ = crate::client::send("settings");
+                                    }),
+                                )
+                                .child("⚙"),
+                        )
+                    }),
+            )
+            .child(list)
+    }
+}
