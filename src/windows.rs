@@ -15,6 +15,8 @@ pub struct WinEntry {
     pub focus_history_id: i64,
     pub fullscreen: bool,
     pub floating: bool,
+    /// foreground command running inside a terminal window, if any
+    pub command: Option<String>,
 }
 
 pub fn fetch() -> Vec<WinEntry> {
@@ -27,6 +29,7 @@ pub fn fetch() -> Vec<WinEntry> {
         // window and should be listed
         .filter(|c| c.mapped && !c.hidden && c.class != "sidetab" && c.workspace.id > 0)
         .map(|c| WinEntry {
+            command: terminal_command(&c.class, c.pid),
             address: c.address,
             class: c.class,
             initial_class: c.initial_class,
@@ -41,6 +44,84 @@ pub fn fetch() -> Vec<WinEntry> {
         .collect();
     entries.sort_by_key(|e| e.focus_history_id);
     entries
+}
+
+/// Foreground command for a window if it's a terminal, None otherwise.
+pub fn terminal_command(class: &str, pid: i64) -> Option<String> {
+    if is_terminal(class) {
+        foreground_command(pid)
+    } else {
+        None
+    }
+}
+
+/// Window classes that are terminal emulators (their titles usually only
+/// say user@host:cwd, so we surface the foreground command as well).
+fn is_terminal(class: &str) -> bool {
+    const TERMINALS: &[&str] = &[
+        "alacritty",
+        "kitty",
+        "foot",
+        "footclient",
+        "ghostty",
+        "wezterm",
+        "konsole",
+        "xterm",
+        "urxvt",
+        "st",
+        "st-256color",
+        "terminator",
+        "tilix",
+        "xfce4-terminal",
+        "gnome-terminal-server",
+    ];
+    let lc = class.to_lowercase();
+    let last = lc.rsplit('.').next().unwrap_or(&lc);
+    TERMINALS.iter().any(|t| *t == lc || *t == last)
+}
+
+/// First child of a process, from /proc — for a terminal that's the shell.
+fn first_child(pid: i64) -> Option<i64> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).ok()?;
+    s.split_whitespace().next()?.parse().ok()
+}
+
+/// The tty's foreground process group (tpgid, 6th field after the comm in
+/// /proc/pid/stat — split on the closing paren since comm may hold spaces).
+fn stat_tpgid(pid: i64) -> Option<i64> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    s.rsplit_once(')')?.1.split_whitespace().nth(5)?.parse().ok()
+}
+
+/// What's running in a terminal window: terminal pid -> child shell ->
+/// the tty's foreground process group leader. None while the shell is
+/// idle at a prompt (tpgid is the shell itself).
+fn foreground_command(pid: i64) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    let shell = first_child(pid)?;
+    let fg = stat_tpgid(shell)?;
+    if fg <= 0 || fg == shell {
+        return None;
+    }
+    let raw = std::fs::read(format!("/proc/{fg}/cmdline")).ok()?;
+    let mut args = raw
+        .split(|&b| b == 0)
+        .filter(|a| !a.is_empty())
+        .map(|a| String::from_utf8_lossy(a).into_owned());
+    let argv0 = args.next()?;
+    let name = argv0.rsplit('/').next().unwrap_or(&argv0).to_string();
+    let rest: Vec<String> = args.take(3).collect();
+    let mut cmd = if rest.is_empty() {
+        name
+    } else {
+        format!("{name} {}", rest.join(" "))
+    };
+    if cmd.chars().count() > 48 {
+        cmd = cmd.chars().take(47).collect::<String>() + "…";
+    }
+    Some(cmd)
 }
 
 /// A section in the panel, macOS-Contexts style: "Pinned" windows first
@@ -120,7 +201,13 @@ pub fn filter(entries: &[WinEntry], query: &str) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(i, e)| {
-            let haystack = format!("{} {} {}", e.class, e.initial_class, e.title);
+            let haystack = format!(
+                "{} {} {} {}",
+                e.class,
+                e.initial_class,
+                e.title,
+                e.command.as_deref().unwrap_or(""),
+            );
             matcher.fuzzy_match(&haystack, query).map(|s| (s, i))
         })
         .collect();

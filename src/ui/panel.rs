@@ -75,6 +75,9 @@ pub struct Switcher {
     pinned_windows: Vec<String>,
     /// open right-click menu, if any
     menu: Option<RowMenu>,
+    /// id of the hovered menu item (hover text-color changes need a
+    /// re-render; gpui hover refinements don't repaint laid-out text)
+    menu_hovered: Option<&'static str>,
     /// entry indices in on-screen order (group by group)
     order: Vec<usize>,
     /// entry indices when a search query is active
@@ -128,6 +131,7 @@ impl Switcher {
             launchers: Vec::new(),
             pinned_windows: Vec::new(),
             menu: None,
+            menu_hovered: None,
             order: Vec::new(),
             filtered: Vec::new(),
             query: String::new(),
@@ -149,6 +153,7 @@ impl Switcher {
     }
 
     pub fn set_address(&mut self, address: String, cx: &mut Context<Self>) {
+        let _ = ctl::remove_border(&address);
         self.address = Some(address);
         self.set_nofocus(true);
         // the freshly mapped window may have grabbed focus before the
@@ -270,20 +275,11 @@ impl Switcher {
             for g in &self.groups {
                 h += GROUP_HEADER_H + g.rows.len() as f32 * ROW_H;
             }
-            if self.show_launchers() {
-                h += GROUP_HEADER_H + self.launchers.len() as f32 * ROW_H;
-            }
-            if self.groups.is_empty() && !self.show_launchers() {
+            if self.groups.is_empty() {
                 h += ROW_H;
             }
         }
         h
-    }
-
-    /// The pinned dock appears in the docked grouped view, not in the
-    /// centered cycling overlay or search results.
-    fn show_launchers(&self) -> bool {
-        !self.launchers.is_empty() && !self.centered() && !self.searching()
     }
 
     /// Pin the app if it isn't pinned, unpin it if it is; persists.
@@ -292,7 +288,7 @@ impl Switcher {
         self.cfg
             .pinned
             .retain(|p| !crate::apps::class_matches(p, class));
-        if self.cfg.pinned.len() == before {
+        if self.cfg.pinned.len() == before && before < crate::config::MAX_PINNED {
             self.cfg.pinned.push(class.to_string());
         }
         let _ = self.cfg.save();
@@ -404,12 +400,12 @@ impl Switcher {
                 let _ = ctl::raise_window(addr);
             }
         }
-        // Visible panels normally drop no_focus so they receive pointer
-        // input (hover + clicks). Over a fullscreen window the tag must
-        // stay: follow_mouse would focus the panel and Hyprland transfers
-        // fullscreen to newly focused windows — the panel would go
-        // fullscreen. View-only there; keyboard switching still works.
-        self.set_nofocus(self.fullscreen_active);
+        // Visible panels drop no_focus so they receive pointer input
+        // (hover + clicks) — Hyprland delivers none to no_focus windows.
+        // Over a fullscreen window this is safe because the
+        // sync_fullscreen-off rule keeps follow_mouse focus from ever
+        // transferring fullscreen onto the panel itself.
+        self.set_nofocus(false);
         cx.notify();
     }
 
@@ -696,7 +692,26 @@ impl Switcher {
                 }
             }
             HyprEvent::WindowsChanged => match self.mode {
-Mode::Hidden | Mode::HoverPending => self.dirty = true,
+                Mode::Hidden | Mode::HoverPending => {
+                    self.dirty = true;
+                    // Hyprland relocates the pinned panel into view when
+                    // switching to an empty workspace — shove it back
+                    // offscreen now, and once more shortly after in case
+                    // the relocation lands after this event
+                    self.park();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(200))
+                            .await;
+                        this.update(cx, |this, _| {
+                            if matches!(this.mode, Mode::Hidden | Mode::HoverPending) {
+                                this.park();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 Mode::Revealed | Mode::Search => {
                     let keep = self.selected_entry().map(|e| e.address.clone());
                     self.refresh();
@@ -732,6 +747,9 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
                     if let Ok(clients) = ctl::clients() {
                         if let Some(c) = clients.into_iter().find(|c| c.address == address) {
                             e.title = c.title;
+                            // title changes are when terminal commands
+                            // start/stop — refresh what's running too
+                            e.command = windows::terminal_command(&c.class, c.pid);
                         }
                     }
                     if self.mode != Mode::Hidden {
@@ -921,6 +939,11 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
         } else {
             entry.title.clone()
         };
+        // terminals: lead with what's running inside ("nvim — user@host:~")
+        let title = match &entry.command {
+            Some(cmd) => format!("{cmd} — {title}"),
+            None => title,
+        };
         let icon = self.icons.resolve(&entry.class, &entry.initial_class);
         let address = entry.address.clone();
         let menu_class = entry.class.clone();
@@ -1004,10 +1027,11 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
             .child(label)
     }
 
-    /// A pinned app's dock row: every click launches the app (the app
-    /// itself decides whether that means a new instance or surfacing the
-    /// existing one). The accent dot marks apps with an open window.
-    fn render_launcher_row(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A pinned app as an icon-only launcher in the panel header. Every
+    /// click launches the app (the app itself decides whether that means
+    /// a new instance or surfacing the existing one); the dot underneath
+    /// marks apps with an open window; right-click offers unpinning.
+    fn render_launcher_icon(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let l = &self.launchers[ix];
         let p = self.palette;
         let icon = self.icons.resolve(&l.class, "");
@@ -1017,35 +1041,29 @@ Mode::Hidden | Mode::HoverPending => self.dirty = true,
         let running = l.running;
         div()
             .id(("launch", ix))
-            .h(px(ROW_H))
+            .w(px(24.))
+            .h(px(24.))
             .flex_none()
+            .relative()
+            .rounded(px(5.))
             .flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .rounded(px(5.))
+            .justify_center()
             .cursor_pointer()
             .hover(|d| d.bg(rgba(p.border)))
             .child(match icon {
-                Some(path) => img(path).w(px(18.)).h(px(18.)).flex_none().into_any_element(),
+                Some(path) => img(path).w(px(16.)).h(px(16.)).flex_none().into_any_element(),
                 None => self.letter_tile(&class).into_any_element(),
             })
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_color(rgba(if running { p.text } else { p.dim_text }))
-                    .child(l.name.clone()),
-            )
             .when(running, |d| {
                 d.child(
                     div()
-                        .w(px(5.))
-                        .h(px(5.))
-                        .flex_none()
-                        .rounded(px(2.5))
+                        .absolute()
+                        .bottom(px(-1.))
+                        .left(px(10.))
+                        .w(px(4.))
+                        .h(px(4.))
+                        .rounded(px(2.))
                         .bg(rgba(p.accent)),
                 )
             })
@@ -1105,7 +1123,7 @@ impl Render for Switcher {
                     list = list.child(self.render_row(pos, entry_ix, cx));
                 }
             }
-        } else if self.groups.is_empty() && !self.show_launchers() {
+        } else if self.groups.is_empty() {
             list = list.child(
                 div()
                     .h(px(ROW_H))
@@ -1125,21 +1143,27 @@ impl Render for Switcher {
                     pos += 1;
                 }
             }
-            // the pinned-apps launcher dock sits below the window list
-            if self.show_launchers() {
-                list = list.child(self.group_header("Pinned Apps".to_string()));
-                for ix in 0..self.launchers.len() {
-                    list = list.child(self.render_launcher_row(ix, cx));
-                }
-            }
         }
 
+        // pinned apps live as icon launchers in the header, next to "Apps"
+        let launcher_icons: Vec<_> = (0..self.launchers.len())
+            .map(|ix| self.render_launcher_icon(ix, cx))
+            .collect();
+
         // right-click menu, floated over the list at the click position
+        if self.menu.is_none() {
+            self.menu_hovered = None; // no hover-out fires when the menu unmounts
+        }
+        let menu_hovered = self.menu_hovered;
         let menu_overlay = self.menu.clone().map(|m| {
+            // danger items read red and hover red with white text; normal
+            // items hover accent. Colors come from tracked hover state.
             let menu_item = |id: &'static str,
                              label: &'static str,
+                             danger: bool,
                              on_click: Box<dyn Fn(&mut Self, &mut Context<Self>)>,
                              cx: &mut Context<Self>| {
+                let hovered = menu_hovered == Some(id);
                 div()
                     .id(id)
                     .h(px(24.))
@@ -1149,16 +1173,43 @@ impl Render for Switcher {
                     .items_center()
                     .text_size(px(12.))
                     .cursor_pointer()
-                    .hover(|d| d.bg(rgba(p.accent)).text_color(rgba(p.accent_text)))
+                    .when(danger && !hovered, |d| d.text_color(rgba(0xf87171ff)))
+                    .when(danger && hovered, |d| {
+                        d.bg(rgba(0xdc2626ff)).text_color(gpui::white())
+                    })
+                    .when(!danger && hovered, |d| {
+                        d.bg(rgba(p.accent)).text_color(rgba(p.accent_text))
+                    })
+                    .on_hover(cx.listener(move |this, is_hovered: &bool, _, cx| {
+                        if *is_hovered {
+                            this.menu_hovered = Some(id);
+                        } else if this.menu_hovered == Some(id) {
+                            this.menu_hovered = None;
+                        }
+                        cx.notify();
+                    }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| on_click(this, cx)),
                     )
                     .child(label)
             };
+            let separator = || {
+                div()
+                    .h(px(1.))
+                    .my(px(4.))
+                    .mx(px(4.))
+                    .flex_none()
+                    .bg(rgba(p.border))
+            };
 
-            let item_count = if m.address.is_some() { 2 } else { 1 };
-            let menu_h = 8.0 + item_count as f32 * 24.0;
+            // window rows get Close Window + both pin actions; launcher
+            // icons get only Unpin App
+            let menu_h = if m.address.is_some() {
+                8.0 + 3.0 * 24.0 + 9.0
+            } else {
+                8.0 + 24.0
+            };
             let x = f32::from(m.position.x).clamp(0.0, self.cfg.width - 150.0);
             let y = f32::from(m.position.y)
                 .min(self.content_height() - menu_h - 8.0)
@@ -1179,6 +1230,23 @@ impl Render for Switcher {
                     cx.notify();
                 }));
 
+            // close first — the most-reached-for action
+            if let Some(address) = m.address.clone() {
+                menu = menu
+                    .child(menu_item(
+                        "rowmenu-close",
+                        "Close Window",
+                        true,
+                        Box::new(move |this, cx| {
+                            let _ = ctl::dispatch(&format!("closewindow address:{address}"));
+                            this.menu = None;
+                            cx.notify();
+                        }),
+                        cx,
+                    ))
+                    .child(separator());
+            }
+
             if let Some(address) = m.address.clone() {
                 let label = if self.is_pinned_window(&address) {
                     "Unpin Window"
@@ -1188,6 +1256,7 @@ impl Render for Switcher {
                 menu = menu.child(menu_item(
                     "rowmenu-pin-window",
                     label,
+                    false,
                     Box::new(move |this, cx| this.toggle_pin_window(&address, cx)),
                     cx,
                 ));
@@ -1201,6 +1270,7 @@ impl Render for Switcher {
             menu.child(menu_item(
                 "rowmenu-pin-app",
                 app_label,
+                false,
                 Box::new(move |this, cx| this.toggle_pin(&class, cx)),
                 cx,
             ))
@@ -1240,7 +1310,18 @@ impl Render for Switcher {
                     .items_center()
                     .text_size(px(12.))
                     .text_color(rgba(p.dim_text))
-                    .child(div().flex_1().child("Apps"))
+                    .child(div().flex_none().child("Apps"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .ml(px(10.))
+                            .children(launcher_icons),
+                    )
                     // in search mode the typed query lives quietly in the
                     // header instead of a dedicated input box
                     .when(self.mode == Mode::Search, |d| {

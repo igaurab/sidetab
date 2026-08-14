@@ -686,6 +686,7 @@ impl Settings {
     }
 
     /// One row in the pinned-apps section: icon, name, pin toggle.
+    /// `disabled` greys out the pin button (pin limit reached).
     fn app_row(
         &self,
         id: (&'static str, usize),
@@ -693,10 +694,47 @@ impl Settings {
         name: String,
         class: String,
         pinned: bool,
+        disabled: bool,
         u: &Ui,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tile = self.letter_tile(&name, &class);
+        let pin_btn = div()
+            .id((id.0, id.1 + 100_000))
+            .w(px(24.))
+            .h(px(24.))
+            .flex_none()
+            .rounded(px(5.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(!disabled, |d| {
+                d.cursor_pointer().hover(|d| d.bg(rgba(u.row))).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.mutate(
+                            |c| {
+                                let before = c.pinned.len();
+                                c.pinned.retain(|p| !class_matches(p, &class));
+                                if c.pinned.len() == before
+                                    && before < crate::config::MAX_PINNED
+                                {
+                                    c.pinned.push(class.clone());
+                                }
+                            },
+                            cx,
+                        )
+                    }),
+                )
+            })
+            .when(disabled, |d| d.opacity(0.3))
+            .child(
+                svg()
+                    .path("icons/pin.svg")
+                    .w(px(13.))
+                    .h(px(13.))
+                    .text_color(rgba(if pinned { u.accent } else { u.dim })),
+            );
         div()
             .id(id)
             .h(px(30.))
@@ -720,41 +758,7 @@ impl Settings {
                     .text_color(rgba(u.text))
                     .child(name),
             )
-            .child(
-                div()
-                    .id((id.0, id.1 + 100_000))
-                    .w(px(24.))
-                    .h(px(24.))
-                    .flex_none()
-                    .rounded(px(5.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(rgba(u.row)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            this.mutate(
-                                |c| {
-                                    let before = c.pinned.len();
-                                    c.pinned.retain(|p| !class_matches(p, &class));
-                                    if c.pinned.len() == before {
-                                        c.pinned.push(class.clone());
-                                    }
-                                },
-                                cx,
-                            )
-                        }),
-                    )
-                    .child(
-                        svg()
-                            .path("icons/pin.svg")
-                            .w(px(13.))
-                            .h(px(13.))
-                            .text_color(rgba(if pinned { u.accent } else { u.dim })),
-                    ),
-            )
+            .child(pin_btn)
     }
 
     fn pinned_pane(&self, u: &Ui, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
@@ -769,16 +773,31 @@ impl Settings {
             .child(self.heading("Apps", u))
             .child(
                 div()
-                    .pb(px(10.))
+                    .pb(px(6.))
                     .flex_none()
                     .text_size(px(11.))
                     .text_color(rgba(u.dim))
                     .child(
-                        "Apps you pin here are launchers shown below the panel's \
-                         window list — every click opens the app (a new instance if \
-                         it allows one). To pin a specific open window to the top of \
-                         the panel instead, right-click its row and choose Pin Window.",
+                        "Pinned apps appear as icons in the panel header — click one \
+                         to open the app.",
                     ),
+            )
+            .child(
+                div()
+                    .pb(px(10.))
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(rgba(if cfg.pinned.len() >= crate::config::MAX_PINNED {
+                        u.accent
+                    } else {
+                        u.dim
+                    }))
+                    .child(format!(
+                        "Up to {} apps can be pinned ({} of {} used).",
+                        crate::config::MAX_PINNED,
+                        cfg.pinned.len(),
+                        crate::config::MAX_PINNED,
+                    )),
             );
 
         // the Pinned section only exists once something is pinned
@@ -793,7 +812,7 @@ impl Settings {
                     let icon = app
                         .and_then(|a| self.app_icon(a))
                         .or_else(|| self.icons.resolve(pin, ""));
-                    self.app_row(("pinned", ix), icon, name, pin.clone(), true, u, cx)
+                    self.app_row(("pinned", ix), icon, name, pin.clone(), true, false, u, cx)
                 }))
                 .child(div().h(px(8.)).flex_none());
         }
@@ -878,6 +897,7 @@ impl Settings {
                     .child("No matching applications"),
             );
         } else {
+            let at_limit = cfg.pinned.len() >= crate::config::MAX_PINNED;
             for app_ix in matches {
                 let app = &self.apps[app_ix];
                 let pinned = cfg.pinned.iter().any(|p| class_matches(p, &app.class));
@@ -887,6 +907,7 @@ impl Settings {
                     app.name.clone(),
                     app.class.clone(),
                     pinned,
+                    at_limit && !pinned,
                     u,
                     cx,
                 ));

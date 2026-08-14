@@ -154,7 +154,7 @@ pub struct Config {
     pub hide_delay_ms: u64,
     /// UI font family; defaults to Liberation Sans.
     pub font: Option<String>,
-    /// Window classes pinned to the top "Pinned" section of the panel.
+    /// App classes pinned as icon launchers in the panel header.
     pub pinned: Vec<String>,
     pub theme: Theme,
 }
@@ -180,6 +180,10 @@ impl Default for Config {
 /// Panel width bounds (shared by the settings slider and live preview).
 pub const WIDTH_MIN: f32 = 240.0;
 pub const WIDTH_MAX: f32 = 640.0;
+
+/// Cap on pinned apps: the header row fits this many icons beside "Apps"
+/// at the minimum panel width.
+pub const MAX_PINNED: usize = 5;
 
 pub fn config_path() -> PathBuf {
     dirs::config_dir()

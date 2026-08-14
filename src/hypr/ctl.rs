@@ -42,6 +42,8 @@ pub struct Client {
     pub focus_history_id: i64,
     pub mapped: bool,
     pub hidden: bool,
+    #[serde(default)]
+    pub pid: i64,
     pub pinned: bool,
     pub floating: bool,
     pub monitor: i64,
@@ -140,6 +142,9 @@ pub fn apply_panel_rules() -> Result<()> {
         // no_focus is tag-scoped so the daemon can lift it for search mode
         // (tagwindow +/- sidetab-nofocus); a class rule could never be lifted.
         "no_focus on, match:tag sidetab-nofocus",
+        // focusing the panel on a fullscreen workspace must never transfer
+        // fullscreen onto the panel itself (mouse use over fullscreen apps)
+        "sync_fullscreen off, match:class sidetab",
         "float on, match:class sidetab-settings",
         "size 620 600, match:class sidetab-settings",
         "center on, match:class sidetab-settings",
@@ -150,6 +155,14 @@ pub fn apply_panel_rules() -> Result<()> {
             .map(|r| format!("keyword windowrule {r}"))
             .collect::<Vec<_>>(),
     )
+}
+
+/// Kill the window's border via a per-window prop. Unlike keyword-applied
+/// windowrules (wiped on every config reload until we re-apply them), a
+/// setprop sticks to the window, so the panel can never flash the theme's
+/// focus border.
+pub fn remove_border(address: &str) -> Result<()> {
+    request(&format!("setprop address:{address} bordersize 0")).map(|_| ())
 }
 
 fn no_warps_enabled() -> bool {
