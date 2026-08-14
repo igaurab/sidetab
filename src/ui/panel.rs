@@ -175,6 +175,12 @@ impl Switcher {
 
     fn refresh(&mut self) {
         self.entries = windows::fetch();
+        // safety net: if no fullscreen window exists anymore (e.g. it was
+        // closed, which emits no fullscreen event), restore temp floats
+        if !self.temp_floated.is_empty() && !self.entries.iter().any(|e| e.fullscreen) {
+            self.restore_temp_floated();
+            self.entries = windows::fetch();
+        }
         // drop pins whose window closed (checked against ALL windows,
         // before any workspace filtering, so other-workspace pins survive)
         self.pinned_windows
@@ -589,13 +595,30 @@ impl Switcher {
                         .find(|c| c.address == address)
                         .map(|c| (c.at, c.size))
                 });
-                let _ = ctl::dispatch(&format!("setfloating address:{address}"));
+                // float it at its own tiled geometry: the window lifts in
+                // place, and the size stays deterministic across repeated
+                // hops (Hyprland's own float sizing shrinks a little on
+                // every setfloating round trip)
+                let mut cmds = vec![format!("dispatch setfloating address:{address}")];
+                if let Some((at, size)) = orig {
+                    cmds.push(format!(
+                        "dispatch resizewindowpixel exact {} {},address:{address}",
+                        size[0], size[1]
+                    ));
+                    cmds.push(format!(
+                        "dispatch movewindowpixel exact {} {},address:{address}",
+                        at[0], at[1]
+                    ));
+                }
+                let _ = ctl::batch(&cmds);
                 self.temp_floated.push((address.to_string(), orig));
             }
             let _ = ctl::focus_window(address);
             let _ = ctl::raise_window(address);
         } else {
-            self.restore_temp_floated();
+            // NOTE: temp-floated windows stay floating (hidden under the
+            // fullscreen app) until fullscreen actually ends — re-tiling
+            // on every hop nests them deeper into the layout each time.
             let _ = ctl::focus_window(address);
         }
     }
