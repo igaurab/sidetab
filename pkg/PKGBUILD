@@ -8,8 +8,8 @@ url="https://github.com/igaurab/sidetab"
 license=('MIT')
 depends=('hyprland' 'vulkan-icd-loader' 'wayland' 'libxkbcommon' 'fontconfig')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz::https://static.crates.io/crates/$pkgname/$pkgname-$pkgver.crate")
-sha256sums=('SKIP') # replace with the real checksum after `cargo publish`
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('739a03cdcddb2e20774c6376402a63c204acb7f8618ab9ff2df3c738fd9b68dd')
 
 prepare() {
   cd "$pkgname-$pkgver"
