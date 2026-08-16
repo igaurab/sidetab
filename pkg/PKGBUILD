@@ -1,6 +1,6 @@
 # Maintainer: igaurab <dev@igaurab.com>
 pkgname=sidetab
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="A Contexts-style window switcher sidebar for Hyprland"
 arch=('x86_64' 'aarch64')

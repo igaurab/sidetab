@@ -59,6 +59,8 @@ pub struct Settings {
     preview_bounds: Option<Bounds<Pixels>>,
     width_track_bounds: Option<Bounds<Pixels>>,
     overlay_track_bounds: Option<Bounds<Pixels>>,
+    /// Result of the last "Install shortcuts" click, shown under the button.
+    bindings_status: Option<String>,
 }
 
 impl Settings {
@@ -76,6 +78,7 @@ impl Settings {
             preview_bounds: None,
             width_track_bounds: None,
             overlay_track_bounds: None,
+            bindings_status: None,
         }
     }
 
@@ -458,6 +461,92 @@ impl Settings {
                  can stay roomy enough for long window titles even with a \
                  narrow sidebar."
                     .to_string(),
+                u,
+            ))
+            .child(self.bindings_block(u, cx))
+    }
+
+    /// The one part of setup that isn't automatic: the shortcuts have to
+    /// exist in the Hyprland config before any of the above does anything.
+    fn bindings_block(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
+        let plan = crate::bindings::plan().ok();
+        let installed = plan.as_ref().is_some_and(|p| p.installed());
+        let (where_, style) = match &plan {
+            Some(p) => (
+                p.file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("your Hyprland config")
+                    .to_string(),
+                p.style.label(),
+            ),
+            None => ("your Hyprland config".to_string(), "Hyprland config"),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .pt(px(18.))
+            .child(self.heading("Keyboard shortcuts", u))
+            .child(self.row(
+                "Alt+Tab and Super+Tab",
+                // Installing is a one-time edit guarded by a marker, so once
+                // it's in there is no second action to offer — just say so.
+                if installed {
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgba(u.dim))
+                        .child("Installed")
+                        .into_any_element()
+                } else {
+                    self.chip(
+                    ("installbindings", 0),
+                    "Install".to_string(),
+                    true,
+                    |this, cx| {
+                        this.bindings_status = Some(match crate::bindings::install() {
+                            Ok(crate::bindings::Outcome::AlreadyInstalled { .. }) => {
+                                "Already installed — nothing to do.".to_string()
+                            }
+                            Ok(crate::bindings::Outcome::Installed {
+                                file, reloaded, ..
+                            }) => {
+                                let name = file
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("your config")
+                                    .to_string();
+                                if reloaded {
+                                    format!("Added to {name} and reloaded — try Alt+Tab.")
+                                } else {
+                                    format!("Added to {name}. Run 'hyprctl reload' to apply.")
+                                }
+                            }
+                            Err(e) => format!("Couldn't install: {e}"),
+                        });
+                        cx.notify();
+                    },
+                    u,
+                    cx,
+                )
+                .into_any_element()
+                },
+                u,
+            ))
+            .child(self.hint(
+                match &self.bindings_status {
+                    Some(msg) => msg.clone(),
+                    None if installed => format!(
+                        "The shortcuts are wired up in {where_}. To change or \
+                         remove them, edit the sidetab block in that file."
+                    ),
+                    None => format!(
+                        "Alt+Tab and Super+Tab do nothing until the shortcuts are \
+                         in your Hyprland config. This adds them to {where_} \
+                         (detected: {style}), backs the file up first, and starts \
+                         the daemon on login."
+                    ),
+                },
                 u,
             ))
     }

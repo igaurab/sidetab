@@ -159,6 +159,11 @@ pub fn dispatch_all(ds: &[Dsp]) -> Result<()> {
     batch(&ds.iter().map(Dsp::encode).collect::<Vec<_>>())
 }
 
+/// Re-read the Hyprland config. Both parsers accept this verbatim.
+pub fn reload() -> Result<()> {
+    request("reload").map(|_| ())
+}
+
 /// One connection, many commands.
 pub fn batch(cmds: &[String]) -> Result<()> {
     if cmds.is_empty() {

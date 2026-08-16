@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1
+
+- **`sidetab install-bindings`** writes the Alt-Tab / Super+Tab shortcuts and
+  the daemon autostart into your Hyprland config, so a fresh install no longer
+  means hand-copying a snippet out of the README. It detects whether Hyprland
+  reads the Lua config or the classic `.conf` one, picks the file that is
+  actually loaded (a `bindings.*` file is only used when the main config really
+  sources it), backs it up, and reloads Hyprland so the shortcuts work straight
+  away. Guarded by a marker comment, so re-running is a no-op.
+- The same action is in the settings window under **Window Switching**, which
+  now states whether the shortcuts are installed and where they live — the one
+  piece of setup the GUI couldn't do for you.
+- Only stock `hl.*` Lua API is emitted, never Omarchy's `o.*` helpers, so the
+  generated block works on any Lua config.
+
 ## 0.2.0
 
 Omarchy 4 support. Omarchy 4 moves its theme state and switches Hyprland to

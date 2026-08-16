@@ -60,13 +60,24 @@ instead.
 ## Hyprland setup
 
 sidetab applies its own window rules at runtime — you only add bindings and
-autostart.
+autostart. The quickest way is to let sidetab do it:
+
+```sh
+sidetab install-bindings
+```
+
+It detects whether your Hyprland reads the Lua config or the classic `.conf`
+one, appends the shortcuts and the daemon autostart to the right file (backing
+it up first), and reloads Hyprland so Alt+Tab works immediately. It's
+idempotent — re-running it does nothing. The same button lives in the settings
+window under **Window Switching**.
+
+To write them yourself instead, use the section matching your config.
 
 Hyprland 0.56 added a Lua config alongside the classic `.conf` one, and
 **Omarchy 4 switched to Lua** (Omarchy 3 and stock `.conf` setups are
 unchanged). sidetab detects which parser is live and talks to Hyprland
 accordingly, so the only thing that differs is how you write the bindings.
-Use the section matching your config.
 
 ### Lua config (Omarchy 4, or any `hyprland.lua` setup)
 
@@ -137,6 +148,8 @@ exec-once = sidetab daemon
 | `sidetab search` | open with keyboard focus + fuzzy filter |
 | `sidetab toggle` / `show` / `hide` | control panel visibility |
 | `sidetab settings` | open the settings window |
+| `sidetab install-bindings` | add the shortcuts + autostart to your Hyprland config (Lua or `.conf`, auto-detected; safe to re-run) |
+| `sidetab setup` | install the app-menu entry and icon (also done on daemon start) |
 | `sidetab quit` | stop the daemon |
 
 ## Configuration

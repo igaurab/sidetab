@@ -1,5 +1,6 @@
 mod apps;
 mod assets;
+mod bindings;
 mod client;
 mod config;
 mod daemon;
@@ -28,6 +29,9 @@ COMMANDS:
     search    open the panel with keyboard focus and fuzzy search
     settings  open the settings window
     setup     install the app-menu entry and icon (also done on daemon start)
+    install-bindings
+              add the Alt-Tab / Super+Tab shortcuts and the daemon autostart
+              to your Hyprland config (detects Lua vs .conf; safe to re-run)
     quit      stop the daemon
 
 CONFIG:
@@ -52,6 +56,31 @@ fn main() -> anyhow::Result<()> {
                 .flatten()
             {
                 println!("installed {}", path.display());
+            }
+            Ok(())
+        }
+        Some("install-bindings") => {
+            match bindings::install()? {
+                bindings::Outcome::AlreadyInstalled { file } => {
+                    println!("bindings already installed in {}", file.display());
+                    println!("nothing to do");
+                }
+                bindings::Outcome::Installed {
+                    file,
+                    backup,
+                    reloaded,
+                } => {
+                    println!("detected: {}", bindings::plan()?.style.label());
+                    if let Some(backup) = backup {
+                        println!("backup:   {}", backup.display());
+                    }
+                    println!("wrote:    {}", file.display());
+                    if reloaded {
+                        println!("reloaded Hyprland — Alt+Tab is live");
+                    } else {
+                        println!("run 'hyprctl reload' (or log back in) to apply");
+                    }
+                }
             }
             Ok(())
         }

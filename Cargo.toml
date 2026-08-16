@@ -1,6 +1,6 @@
 [package]
 name = "sidetab"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "A Contexts-style window switcher sidebar for Hyprland — fast Alt-Tab panel with fuzzy search and hover reveal"
 license = "MIT"
