@@ -186,8 +186,11 @@ impl Switcher {
 
     fn set_nofocus(&self, on: bool) {
         if let Some(addr) = &self.address {
-            let sign = if on { '+' } else { '-' };
-            let _ = ctl::dispatch(&format!("tagwindow {sign}{NOFOCUS_TAG} address:{addr}"));
+            let _ = ctl::dispatch(ctl::Dsp::Tag {
+                add: on,
+                tag: NOFOCUS_TAG,
+                addr,
+            });
         }
     }
 
@@ -432,9 +435,17 @@ impl Switcher {
         };
         let (x_shown, x_hidden, y, w, h) = self.geometry(&mon);
         let x = if revealed { x_shown } else { x_hidden };
-        let _ = ctl::batch(&[
-            format!("dispatch resizewindowpixel exact {w} {h},address:{addr}"),
-            format!("dispatch movewindowpixel exact {x} {y},address:{addr}"),
+        let _ = ctl::dispatch_all(&[
+            ctl::Dsp::ResizeExact {
+                w,
+                h,
+                addr: &addr,
+            },
+            ctl::Dsp::MoveExact {
+                x,
+                y,
+                addr: &addr,
+            },
         ]);
     }
 
@@ -695,18 +706,10 @@ impl Switcher {
                         // workspace switching for Super+Tab (the Omarchy
                         // defaults these binds replaced)
                         if cmd.ends_with("-ws") {
-                            let _ = ctl::dispatch(if delta > 0 {
-                                "workspace e+1"
-                            } else {
-                                "workspace e-1"
-                            });
+                            let _ = ctl::dispatch(ctl::Dsp::WorkspaceRel { forward: delta > 0 });
                         } else {
-                            let _ = ctl::dispatch(if delta > 0 {
-                                "cyclenext"
-                            } else {
-                                "cyclenext prev"
-                            });
-                            let _ = ctl::dispatch("bringactivetotop");
+                            let _ = ctl::dispatch(ctl::Dsp::CycleNext { prev: delta <= 0 });
+                            let _ = ctl::dispatch(ctl::Dsp::BringActiveToTop);
                         }
                         return;
                     }
@@ -1180,7 +1183,7 @@ impl Switcher {
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     if let Some(exec) = &exec {
-                        let _ = ctl::dispatch(&format!("exec {exec}"));
+                        let _ = ctl::dispatch(ctl::Dsp::Exec(&exec));
                     } else if let Some(entry) = this.entries.iter().find(|e| {
                         crate::apps::class_matches(&class, &e.class)
                             || crate::apps::class_matches(&class, &e.initial_class)
@@ -1349,7 +1352,7 @@ impl Render for Switcher {
                         "Close Window",
                         true,
                         Box::new(move |this, cx| {
-                            let _ = ctl::dispatch(&format!("closewindow address:{address}"));
+                            let _ = ctl::dispatch(ctl::Dsp::CloseWindow(&address));
                             this.menu = None;
                             // closing shrinks the panel; hold it open so the
                             // next window can be closed right away

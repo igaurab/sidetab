@@ -15,8 +15,148 @@ fn request(cmd: &str) -> Result<String> {
     Ok(buf)
 }
 
-pub fn dispatch(args: &str) -> Result<()> {
-    request(&format!("dispatch {args}")).map(|_| ())
+/// Which config parser the running Hyprland uses.
+///
+/// Hyprland 0.56 added a Lua config; Omarchy 4 adopts it, Omarchy 3 stays on
+/// the legacy `.conf` parser. Under Lua, the socket rejects `keyword` outright
+/// and reinterprets `dispatch <args>` as the Lua expression
+/// `hl.dispatch(<args>)`, so both need a second spelling.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Parser {
+    Legacy,
+    Lua,
+}
+
+/// Probed once per process: a bare `keyword` is a no-op the legacy parser
+/// answers with its own usage error, while the Lua parser answers with a
+/// refusal naming "non-legacy". Nothing is mutated either way.
+pub fn parser() -> Parser {
+    static PARSER: std::sync::OnceLock<Parser> = std::sync::OnceLock::new();
+    *PARSER.get_or_init(|| match request("keyword") {
+        Ok(reply) if reply.contains("non-legacy") => Parser::Lua,
+        _ => Parser::Legacy,
+    })
+}
+
+/// Run a Lua chunk. Only meaningful on [`Parser::Lua`].
+fn eval(code: &str) -> Result<()> {
+    request(&format!("eval {code}")).map(|_| ())
+}
+
+/// Escape a Lua single-quoted string literal. Addresses and tags are
+/// sidetab's own, but window titles reach `exec` lines from arbitrary apps.
+fn lua_str(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// The dispatchers sidetab uses, spelled for whichever parser is live.
+///
+/// Kept as a closed enum rather than free-form strings so that adding a
+/// dispatcher forces both spellings to be written.
+pub enum Dsp<'a> {
+    ResizeExact { w: i64, h: i64, addr: &'a str },
+    MoveExact { x: i64, y: i64, addr: &'a str },
+    Tag { add: bool, tag: &'a str, addr: &'a str },
+    FocusWindow(&'a str),
+    FocusCurrentOrLast,
+    RaiseWindow(&'a str),
+    BringActiveToTop,
+    CloseWindow(&'a str),
+    Exec(&'a str),
+    CycleNext { prev: bool },
+    WorkspaceRel { forward: bool },
+}
+
+impl Dsp<'_> {
+    /// `dispatch <args>` for the legacy parser.
+    fn legacy(&self) -> String {
+        match self {
+            Dsp::ResizeExact { w, h, addr } => {
+                format!("dispatch resizewindowpixel exact {w} {h},address:{addr}")
+            }
+            Dsp::MoveExact { x, y, addr } => {
+                format!("dispatch movewindowpixel exact {x} {y},address:{addr}")
+            }
+            Dsp::Tag { add, tag, addr } => {
+                let sign = if *add { '+' } else { '-' };
+                format!("dispatch tagwindow {sign}{tag} address:{addr}")
+            }
+            Dsp::FocusWindow(addr) => format!("dispatch focuswindow address:{addr}"),
+            Dsp::FocusCurrentOrLast => "dispatch focuscurrentorlast".into(),
+            Dsp::RaiseWindow(addr) => format!("dispatch alterzorder top,address:{addr}"),
+            Dsp::BringActiveToTop => "dispatch bringactivetotop".into(),
+            Dsp::CloseWindow(addr) => format!("dispatch closewindow address:{addr}"),
+            Dsp::Exec(cmd) => format!("dispatch exec {cmd}"),
+            Dsp::CycleNext { prev } => {
+                if *prev {
+                    "dispatch cyclenext prev".into()
+                } else {
+                    "dispatch cyclenext".into()
+                }
+            }
+            Dsp::WorkspaceRel { forward } => {
+                let step = if *forward { "e+1" } else { "e-1" };
+                format!("dispatch workspace {step}")
+            }
+        }
+    }
+
+    /// The Lua expression the 0.56 socket wraps in `hl.dispatch(...)`.
+    fn lua(&self) -> String {
+        let win = |addr: &str| format!("window = {}", lua_str(&format!("address:{addr}")));
+        match self {
+            Dsp::ResizeExact { w, h, addr } => format!(
+                "dispatch hl.dsp.window.resize({{ exact = true, x = {w}, y = {h}, {} }})",
+                win(addr)
+            ),
+            Dsp::MoveExact { x, y, addr } => format!(
+                "dispatch hl.dsp.window.move({{ exact = true, x = {x}, y = {y}, {} }})",
+                win(addr)
+            ),
+            Dsp::Tag { add, tag, addr } => {
+                let sign = if *add { '+' } else { '-' };
+                format!(
+                    "dispatch hl.dsp.window.tag({{ tag = {}, {} }})",
+                    lua_str(&format!("{sign}{tag}")),
+                    win(addr)
+                )
+            }
+            Dsp::FocusWindow(addr) => format!("dispatch hl.dsp.focus({{ {} }})", win(addr)),
+            // The Lua focus dispatcher has no current-or-last toggle; `last`
+            // is the same motion for the one case sidetab uses it in.
+            Dsp::FocusCurrentOrLast => "dispatch hl.dsp.focus({ last = true })".into(),
+            Dsp::RaiseWindow(addr) => format!(
+                "dispatch hl.dsp.window.alter_zorder({{ mode = 'top', {} }})",
+                win(addr)
+            ),
+            Dsp::BringActiveToTop => "dispatch hl.dsp.window.bring_to_top()".into(),
+            Dsp::CloseWindow(addr) => format!("dispatch hl.dsp.window.close({{ {} }})", win(addr)),
+            Dsp::Exec(cmd) => format!("dispatch hl.dsp.exec_cmd({})", lua_str(cmd)),
+            Dsp::CycleNext { prev } => {
+                format!("dispatch hl.dsp.window.cycle_next({{ prev = {prev} }})")
+            }
+            Dsp::WorkspaceRel { forward } => {
+                let step = if *forward { "e+1" } else { "e-1" };
+                format!("dispatch hl.dsp.focus({{ workspace = {} }})", lua_str(step))
+            }
+        }
+    }
+
+    fn encode(&self) -> String {
+        match parser() {
+            Parser::Legacy => self.legacy(),
+            Parser::Lua => self.lua(),
+        }
+    }
+}
+
+pub fn dispatch(d: Dsp) -> Result<()> {
+    request(&d.encode()).map(|_| ())
+}
+
+/// One connection, many dispatchers.
+pub fn dispatch_all(ds: &[Dsp]) -> Result<()> {
+    batch(&ds.iter().map(Dsp::encode).collect::<Vec<_>>())
 }
 
 /// One connection, many commands.
@@ -133,34 +273,53 @@ pub fn active_address() -> Option<String> {
 /// steal focus with follow_mouse=1). Re-applied on configreloaded.
 pub fn apply_panel_rules() -> Result<()> {
     let rounding = crate::config::CARD_ROUNDING as i64;
+    // (legacy rule body, Lua rule table) — the same rule in both spellings.
+    // The Lua matcher is a regex, so the class matches are anchored to keep
+    // the panel's rules off the settings window (which contains "sidetab").
     let rules = [
-        "float on, match:class sidetab".to_string(),
-        "pin on, match:class sidetab".to_string(),
-        "no_anim on, match:class sidetab".to_string(),
+        ("float on, match:class sidetab".to_string(),
+         "{ float = true, match = { class = '^sidetab$' } }".to_string()),
+        ("pin on, match:class sidetab".to_string(),
+         "{ pin = true, match = { class = '^sidetab$' } }".to_string()),
+        ("no_anim on, match:class sidetab".to_string(),
+         "{ no_anim = true, match = { class = '^sidetab$' } }".to_string()),
         // no_focus is tag-scoped so the daemon can lift it for search mode
         // (tagwindow +/- sidetab-nofocus); a class rule could never be lifted.
-        "no_focus on, match:tag sidetab-nofocus".to_string(),
+        ("no_focus on, match:tag sidetab-nofocus".to_string(),
+         "{ no_focus = true, match = { tag = 'sidetab-nofocus' } }".to_string()),
         // The chrome rules are tag-scoped so they can be re-asserted on a
         // live window — see remove_chrome.
-        format!("border_size 0, match:tag {CHROMELESS_TAG}"),
-        format!("no_shadow on, match:tag {CHROMELESS_TAG}"),
+        (format!("border_size 0, match:tag {CHROMELESS_TAG}"),
+         format!("{{ border_size = 0, match = {{ tag = '{CHROMELESS_TAG}' }} }}")),
+        (format!("no_shadow on, match:tag {CHROMELESS_TAG}"),
+         format!("{{ no_shadow = true, match = {{ tag = '{CHROMELESS_TAG}' }} }}")),
         // matching the card's own radius: Hyprland clips the window's blur
         // region to this, and a square region bleeds into the card's
         // transparent corners
-        format!("rounding {rounding}, match:tag {CHROMELESS_TAG}"),
+        (format!("rounding {rounding}, match:tag {CHROMELESS_TAG}"),
+         format!("{{ rounding = {rounding}, match = {{ tag = '{CHROMELESS_TAG}' }} }}")),
         // focusing the panel on a fullscreen workspace must never transfer
         // fullscreen onto the panel itself (mouse use over fullscreen apps)
-        "sync_fullscreen off, match:class sidetab".to_string(),
-        format!("float on, match:class {SETTINGS_CLASS}"),
-        format!("size 680 600, match:class {SETTINGS_CLASS}"),
-        format!("center on, match:class {SETTINGS_CLASS}"),
+        ("sync_fullscreen off, match:class sidetab".to_string(),
+         "{ sync_fullscreen = false, match = { class = '^sidetab$' } }".to_string()),
+        (format!("float on, match:class {SETTINGS_CLASS}"),
+         format!("{{ float = true, match = {{ class = '^{SETTINGS_CLASS}$' }} }}")),
+        (format!("size 680 600, match:class {SETTINGS_CLASS}"),
+         format!("{{ size = '680 600', match = {{ class = '^{SETTINGS_CLASS}$' }} }}")),
+        (format!("center on, match:class {SETTINGS_CLASS}"),
+         format!("{{ center = true, match = {{ class = '^{SETTINGS_CLASS}$' }} }}")),
     ];
-    batch(
-        &rules
+    let cmds = match parser() {
+        Parser::Legacy => rules
             .iter()
-            .map(|r| format!("keyword windowrule {r}"))
+            .map(|(legacy, _)| format!("keyword windowrule {legacy}"))
             .collect::<Vec<_>>(),
-    )
+        Parser::Lua => rules
+            .iter()
+            .map(|(_, lua)| format!("eval hl.window_rule({lua})"))
+            .collect::<Vec<_>>(),
+    };
+    batch(&cmds)
 }
 
 pub const CHROMELESS_TAG: &str = "sidetab-chromeless";
@@ -179,38 +338,52 @@ pub const SETTINGS_CLASS: &str = "sidetab-settings";
 /// Hyprland 0.56. Changing a window's tags does trigger a re-evaluation,
 /// hence the drop-and-re-add.
 pub fn remove_chrome(address: &str) -> Result<()> {
-    batch(&[
-        format!("dispatch tagwindow -{CHROMELESS_TAG} address:{address}"),
-        format!("dispatch tagwindow +{CHROMELESS_TAG} address:{address}"),
+    dispatch_all(&[
+        Dsp::Tag {
+            add: false,
+            tag: CHROMELESS_TAG,
+            addr: address,
+        },
+        Dsp::Tag {
+            add: true,
+            tag: CHROMELESS_TAG,
+            addr: address,
+        },
     ])
 }
 
 fn no_warps_enabled() -> bool {
     request("getoption cursor:no_warps")
-        .map(|s| s.contains("int: 1"))
+        // legacy prints `int: 1`; the Lua parser reports the option's real
+        // bool type as `bool: true`.
+        .map(|s| s.contains("int: 1") || s.contains("bool: true"))
         .unwrap_or(false)
+}
+
+/// Set `cursor:no_warps`, in whichever spelling the live parser accepts.
+fn set_no_warps(on: bool) -> String {
+    match parser() {
+        Parser::Legacy => format!("keyword cursor:no_warps {on}"),
+        Parser::Lua => format!("eval hl.config({{ cursor = {{ no_warps = {on} }} }})"),
+    }
 }
 
 /// Dispatch without letting Hyprland warp the cursor to the focused
 /// window (restores the user's own no_warps setting afterwards).
-fn dispatch_no_warp(args: &str) -> Result<()> {
+fn dispatch_no_warp(d: Dsp) -> Result<()> {
     if no_warps_enabled() {
-        dispatch(args)
+        dispatch(d)
     } else {
-        batch(&[
-            "keyword cursor:no_warps true".to_string(),
-            format!("dispatch {args}"),
-            "keyword cursor:no_warps false".to_string(),
-        ])
+        batch(&[set_no_warps(true), d.encode(), set_no_warps(false)])
     }
 }
 
 pub fn focus_window(address: &str) -> Result<()> {
-    dispatch_no_warp(&format!("focuswindow address:{address}"))
+    dispatch_no_warp(Dsp::FocusWindow(address))
 }
 
 pub fn focus_current_or_last() -> Result<()> {
-    dispatch_no_warp("focuscurrentorlast")
+    dispatch_no_warp(Dsp::FocusCurrentOrLast)
 }
 
 /// Vertical extent (y, height) of the settings window, if it's open. The
@@ -228,5 +401,5 @@ pub fn settings_window_band() -> Option<(f64, f64)> {
 /// as allowed-over-fullscreen, so this is how both the panel and switch
 /// targets stay visible above a fullscreen window.
 pub fn raise_window(address: &str) -> Result<()> {
-    dispatch(&format!("alterzorder top,address:{address}"))
+    dispatch(Dsp::RaiseWindow(address))
 }

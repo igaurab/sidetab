@@ -102,9 +102,20 @@ pub fn luma(c: u32) -> f32 {
 /// The Omarchy theme directory, if Omarchy is installed and has a theme
 /// selected. It's a symlink Omarchy re-points on every theme switch, so
 /// this is re-read on each panel reveal rather than cached.
+///
+/// Omarchy 4 moved the `current` pointer out of the config directory into
+/// `~/.local/state`; Omarchy 3 kept it under `~/.config`. Try the newer
+/// location first so a machine carrying a stale v3 leftover still themes
+/// from the live one.
 fn omarchy_theme_dir() -> Option<PathBuf> {
-    let dir = dirs::config_dir()?.join("omarchy/current/theme");
-    dir.join("colors.toml").exists().then_some(dir)
+    let candidates = [
+        dirs::state_dir().map(|d| d.join("omarchy/current/theme")),
+        dirs::config_dir().map(|d| d.join("omarchy/current/theme")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|dir| dir.join("colors.toml").exists())
 }
 
 /// The subset of an Omarchy theme's `colors.toml` the panel uses.
@@ -113,15 +124,20 @@ struct OmarchyColors {
     accent: Option<String>,
     foreground: Option<String>,
     background: Option<String>,
+    /// Omarchy 4: `"light"` or `"dark"`. Absent on Omarchy 3 themes, which
+    /// signal light mode with a `light.mode` file instead.
+    mode: Option<String>,
 }
 
-/// Build a palette from the current Omarchy theme. Light themes are marked
-/// by a `light.mode` file in the theme directory.
+/// Build a palette from the current Omarchy theme.
 pub fn omarchy_palette() -> Option<Palette> {
     let dir = omarchy_theme_dir()?;
     let colors: OmarchyColors =
         toml::from_str(&std::fs::read_to_string(dir.join("colors.toml")).ok()?).ok()?;
-    let dark = !dir.join("light.mode").exists();
+    let dark = match colors.mode.as_deref() {
+        Some(mode) => !mode.trim().eq_ignore_ascii_case("light"),
+        None => !dir.join("light.mode").exists(),
+    };
     let mut p = if dark { DARK } else { LIGHT };
     p.dark = dark;
 

@@ -60,7 +60,45 @@ instead.
 ## Hyprland setup
 
 sidetab applies its own window rules at runtime — you only add bindings and
-autostart. In `~/.config/hypr/bindings.conf` (or your main config):
+autostart.
+
+Hyprland 0.56 added a Lua config alongside the classic `.conf` one, and
+**Omarchy 4 switched to Lua** (Omarchy 3 and stock `.conf` setups are
+unchanged). sidetab detects which parser is live and talks to Hyprland
+accordingly, so the only thing that differs is how you write the bindings.
+Use the section matching your config.
+
+### Lua config (Omarchy 4, or any `hyprland.lua` setup)
+
+In `~/.config/hypr/bindings.lua`:
+
+```lua
+-- Replace Alt-Tab with sidetab (all workspaces, centered overlay)
+hl.unbind("ALT + TAB")
+hl.unbind("ALT + SHIFT + TAB")
+o.bind("ALT + TAB", "Window switcher", "sidetab next", { repeating = true })
+o.bind("ALT + SHIFT + TAB", "Window switcher (reverse)", "sidetab prev", { repeating = true })
+-- switch on Alt release
+o.bind("ALT + ALT_L", nil, "sidetab commit", { release = true, transparent = true })
+
+-- Super+Tab cycles the current workspace only
+hl.unbind("SUPER + TAB")
+o.bind("SUPER + TAB", "Switch window on workspace", "sidetab next-ws", { repeating = true })
+o.bind("SUPER + SUPER_L", nil, "sidetab commit", { release = true, transparent = true })
+
+-- Optional: fuzzy window search
+-- o.bind("SUPER + SLASH", "Window search", "sidetab search")
+```
+
+And in `~/.config/hypr/autostart.lua`:
+
+```lua
+o.launch_on_start("sidetab daemon")
+```
+
+### Classic `.conf` config (Omarchy 3 and earlier)
+
+In `~/.config/hypr/bindings.conf` (or your main config):
 
 ```conf
 # Replace Alt-Tab with sidetab (all workspaces, centered overlay)
@@ -83,6 +121,10 @@ And in your autostart:
 ```conf
 exec-once = sidetab daemon
 ```
+
+> **Upgrading to Omarchy 4?** Omarchy 4 stops reading the `.conf` files, so
+> bindings and `exec-once` lines left in `bindings.conf` / `autostart.conf`
+> go silently inactive. Move them to the `.lua` files above.
 
 ## Commands
 

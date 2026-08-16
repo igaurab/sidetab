@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.0
+
+Omarchy 4 support. Omarchy 4 moves its theme state and switches Hyprland to
+the new Lua config parser; sidetab now detects what's live at runtime and
+speaks to it accordingly, so the same binary works on Omarchy 3 and 4.
+
+### Fixed
+
+- **Window rules no longer silently fail on Omarchy 4.** Hyprland 0.56's Lua
+  parser rejects `keyword` outright and reinterprets `dispatch <args>` as a
+  Lua expression, so none of the panel's rules landed: the panel and the
+  settings window opened as ordinary tiled windows, unpinned, with a full
+  border and square corners. Both are applied through `hl.window_rule` /
+  `hl.dsp.*` when the Lua parser is in use, and through the original
+  `keyword` / `dispatch` strings otherwise.
+- **Theming follows Omarchy 4 again.** The current-theme pointer moved from
+  `~/.config/omarchy/current/theme` to `~/.local/state/omarchy/current/theme`,
+  which left the panel falling back to the system light/dark palette. Both
+  locations are checked, newest first.
+- Light themes are detected from `colors.toml`'s `mode` key (Omarchy 4),
+  falling back to the `light.mode` marker file (Omarchy 3).
+- `cursor:no_warps` is read correctly on Hyprland 0.56, which reports the
+  option as `bool: true` where earlier versions printed `int: 1`.
+
+### Changed
+
+- Dispatchers are now a closed set rather than free-form command strings, so
+  each one carries both a legacy and a Lua spelling.
+- README documents binding setup for both the Lua config (Omarchy 4) and the
+  classic `.conf` config, and notes that Omarchy 4 stops reading `.conf` —
+  bindings and `exec-once` lines left there go silently inactive.
+
 ## 0.1.2
 
 - **Omarchy theming**: the new `theme.variant = "omarchy"` (now the default)
