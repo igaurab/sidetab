@@ -263,6 +263,11 @@ impl Default for Config {
 pub const WIDTH_MIN: f32 = 170.0;
 pub const WIDTH_MAX: f32 = 640.0;
 
+/// Alt-Tab overlay width bounds. The overlay is centered rather than docked,
+/// so it can go wider than the sidebar to fit long window titles.
+pub const OVERLAY_WIDTH_MIN: f32 = 320.0;
+pub const OVERLAY_WIDTH_MAX: f32 = 1200.0;
+
 /// Corner radius of the panel card. Hyprland has to round the *window* to
 /// the same radius: it clips a blurred window's blur region to the window's
 /// rounding, so a square window paints blur into the corners the card

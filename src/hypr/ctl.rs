@@ -151,9 +151,9 @@ pub fn apply_panel_rules() -> Result<()> {
         // focusing the panel on a fullscreen workspace must never transfer
         // fullscreen onto the panel itself (mouse use over fullscreen apps)
         "sync_fullscreen off, match:class sidetab".to_string(),
-        "float on, match:class sidetab-settings".to_string(),
-        "size 620 600, match:class sidetab-settings".to_string(),
-        "center on, match:class sidetab-settings".to_string(),
+        format!("float on, match:class {SETTINGS_CLASS}"),
+        format!("size 680 600, match:class {SETTINGS_CLASS}"),
+        format!("center on, match:class {SETTINGS_CLASS}"),
     ];
     batch(
         &rules
@@ -164,6 +164,9 @@ pub fn apply_panel_rules() -> Result<()> {
 }
 
 pub const CHROMELESS_TAG: &str = "sidetab-chromeless";
+
+/// Wayland app_id of the settings window (see daemon::run).
+pub const SETTINGS_CLASS: &str = "sidetab-settings";
 
 /// Strip the window's decorations: no focus border, no drop shadow, and a
 /// rounding that matches the card so Hyprland's blur stays inside it.
@@ -208,6 +211,17 @@ pub fn focus_window(address: &str) -> Result<()> {
 
 pub fn focus_current_or_last() -> Result<()> {
     dispatch_no_warp("focuscurrentorlast")
+}
+
+/// Vertical extent (y, height) of the settings window, if it's open. The
+/// centered overlay preview steers around it so the slider being dragged
+/// stays visible.
+pub fn settings_window_band() -> Option<(f64, f64)> {
+    clients()
+        .ok()?
+        .into_iter()
+        .find(|c| c.class == SETTINGS_CLASS && c.mapped && !c.hidden)
+        .map(|c| (c.at[1] as f64, c.size[1] as f64))
 }
 
 /// Raise a window to the top of the stack. Hyprland marks raised windows

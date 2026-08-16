@@ -4,7 +4,10 @@
 //! immediately and persists to ~/.config/sidetab/config.toml.
 
 use crate::apps::{class_matches, DesktopApp};
-use crate::config::{mix, Config, CycleScope, Edge, ThemeVariant, WIDTH_MAX, WIDTH_MIN};
+use crate::config::{
+    mix, Config, CycleScope, Edge, ThemeVariant, OVERLAY_WIDTH_MAX, OVERLAY_WIDTH_MIN, WIDTH_MAX,
+    WIDTH_MIN,
+};
 use crate::icons::IconResolver;
 use crate::ui::panel::Switcher;
 use gpui::{
@@ -26,7 +29,7 @@ enum Section {
 
 const SECTIONS: [(Section, &str, &str); 5] = [
     (Section::Panel, "icons/panel.svg", "Panel"),
-    (Section::Shortcuts, "icons/keys.svg", "Switching"),
+    (Section::Shortcuts, "icons/keys.svg", "Window Switching"),
     (Section::Appearance, "icons/appearance.svg", "Appearance"),
     (Section::PinnedApps, "icons/pin.svg", "Apps"),
     (Section::About, "icons/info.svg", "About"),
@@ -37,6 +40,7 @@ enum Drag {
     Slider,
     Preview,
     Width,
+    OverlayWidth,
 }
 
 
@@ -54,6 +58,7 @@ pub struct Settings {
     track_bounds: Option<Bounds<Pixels>>,
     preview_bounds: Option<Bounds<Pixels>>,
     width_track_bounds: Option<Bounds<Pixels>>,
+    overlay_track_bounds: Option<Bounds<Pixels>>,
 }
 
 impl Settings {
@@ -70,6 +75,7 @@ impl Settings {
             track_bounds: None,
             preview_bounds: None,
             width_track_bounds: None,
+            overlay_track_bounds: None,
         }
     }
 
@@ -107,17 +113,33 @@ impl Settings {
                 self.cfg.v_pos = frac;
                 self.cfg.edge = if left { Edge::Left } else { Edge::Right };
             }
-            Some(Drag::Width) => {
-                let Some(b) = self.width_track_bounds else { return };
+            Some(drag @ (Drag::Width | Drag::OverlayWidth)) => {
+                let overlay = drag == Drag::OverlayWidth;
+                let bounds = if overlay {
+                    self.overlay_track_bounds
+                } else {
+                    self.width_track_bounds
+                };
+                let Some(b) = bounds else { return };
+                let (min, max) = if overlay {
+                    (OVERLAY_WIDTH_MIN, OVERLAY_WIDTH_MAX)
+                } else {
+                    (WIDTH_MIN, WIDTH_MAX)
+                };
                 let usable = (f32::from(b.size.width) - 16.0).max(1.0);
                 let frac =
                     ((f32::from(pos.x) - f32::from(b.origin.x) - 8.0) / usable).clamp(0.0, 1.0);
-                // snap to 10px steps within [WIDTH_MIN, WIDTH_MAX]
-                let w = WIDTH_MIN + (WIDTH_MAX - WIDTH_MIN) * frac;
-                self.cfg.width = (w / 10.0).round() * 10.0;
+                // snap to 10px steps within [min, max]
+                let w = ((min + (max - min) * frac) / 10.0).round() * 10.0;
+                if overlay {
+                    self.cfg.overlay_width = w;
+                } else {
+                    self.cfg.width = w;
+                }
                 // light path: only the content card re-renders per event
-                let w = self.cfg.width;
-                self.panel.update(cx, |panel, cx| panel.preview_width(w, cx));
+                let cfg = self.cfg.clone();
+                self.panel
+                    .update(cx, |panel, cx| panel.preview_width(cfg, w, max, overlay, cx));
                 cx.notify();
                 return;
             }
@@ -249,6 +271,94 @@ impl Settings {
             )
     }
 
+    /// A width slider. The readout is a plain-language size name rather than
+    /// a pixel count — the exact number means little to anyone who isn't
+    /// eyeballing it against the live preview anyway. Used for both the
+    /// sidebar width and the Alt-Tab window width; `drag` picks which one
+    /// the pointer is steering and which track bounds to record.
+    fn width_slider(
+        &self,
+        id: &'static str,
+        value: f32,
+        min: f32,
+        max: f32,
+        drag: Drag,
+        u: &Ui,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let frac = ((value - min) / (max - min)).clamp(0.0, 1.0);
+        let entity = cx.entity();
+        div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(2.))
+            .child(
+                div()
+                    .id(id)
+                    .w(px(180.))
+                    .h(px(20.))
+                    .relative()
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            this.dragging = Some(drag);
+                            this.drag_update(ev.position, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(8.))
+                            .left(px(8.))
+                            .right(px(8.))
+                            .h(px(4.))
+                            .rounded(px(2.))
+                            .bg(rgba(u.row)),
+                    )
+                    .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                entity.update(cx, |this, _| match drag {
+                                    Drag::OverlayWidth => {
+                                        this.overlay_track_bounds = Some(bounds)
+                                    }
+                                    _ => this.width_track_bounds = Some(bounds),
+                                })
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .size_full(),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(3.))
+                            .left(gpui::relative(frac))
+                            .ml(px(-14.0 * frac))
+                            .w(px(14.))
+                            .h(px(14.))
+                            .rounded(px(7.))
+                            .bg(rgba(u.accent)),
+                    ),
+            )
+            .child(
+                // a fixed scale under the track, so the size reads off the
+                // knob's position instead of a number nobody can picture
+                div()
+                    .w(px(180.))
+                    .flex()
+                    .justify_between()
+                    .px(px(4.))
+                    .text_size(px(10.))
+                    .text_color(rgba(u.dim))
+                    .child("Small")
+                    .child("Medium")
+                    .child("Large"),
+            )
+    }
+
     fn row(&self, label: &'static str, control: impl IntoElement, u: &Ui) -> impl IntoElement {
         div()
             .flex()
@@ -310,7 +420,7 @@ impl Settings {
         div()
             .flex()
             .flex_col()
-            .child(self.heading("Switching", u))
+            .child(self.heading("Window Switching", u))
             .child(div().pb(px(6.)).text_color(rgba(u.text)).child("Alt + Tab cycles"))
             .child(self.scope_chips("alttab", cfg.alt_tab, |c, s| c.alt_tab = s, u, cx))
             .child(
@@ -330,28 +440,23 @@ impl Settings {
                 u,
             ))
             .child(self.row(
-                "Overlay width",
-                self.stepper(
-                    "overlaywidth",
-                    format!("{}px", cfg.overlay_width as i64),
-                    |this, cx| {
-                        this.mutate(
-                            |c| c.overlay_width = (c.overlay_width - 40.0).max(WIDTH_MIN),
-                            cx,
-                        )
-                    },
-                    |this, cx| {
-                        this.mutate(|c| c.overlay_width = (c.overlay_width + 40.0).min(1200.0), cx)
-                    },
+                "Alt-Tab window size",
+                self.width_slider(
+                    "overlayslider",
+                    cfg.overlay_width,
+                    OVERLAY_WIDTH_MIN,
+                    OVERLAY_WIDTH_MAX,
+                    Drag::OverlayWidth,
                     u,
                     cx,
                 ),
                 u,
             ))
             .child(self.hint(
-                "Width of the centered overlay both shortcuts show. It's \
-                 separate from the sidebar width, so the overlay can stay \
-                 wide enough for long window titles."
+                "How wide the window both shortcuts pop up in the middle of \
+                 the screen is. It's set separately from the sidebar, so it \
+                 can stay roomy enough for long window titles even with a \
+                 narrow sidebar."
                     .to_string(),
                 u,
             ))
@@ -538,71 +643,16 @@ impl Settings {
             .flex_col()
             .child(self.heading("Panel", u))
             .child(self.row(
-                "Sidebar width",
-                {
-                    let wfrac =
-                        ((cfg.width - WIDTH_MIN) / (WIDTH_MAX - WIDTH_MIN)).clamp(0.0, 1.0);
-                    let entity = cx.entity();
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .id("wslider")
-                                .w(px(180.))
-                                .h(px(20.))
-                                .relative()
-                                .cursor_pointer()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, ev: &MouseDownEvent, _, cx| {
-                                        this.dragging = Some(Drag::Width);
-                                        this.drag_update(ev.position, cx);
-                                    }),
-                                )
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top(px(8.))
-                                        .left(px(8.))
-                                        .right(px(8.))
-                                        .h(px(4.))
-                                        .rounded(px(2.))
-                                        .bg(rgba(u.row)),
-                                )
-                                .child(
-                                    canvas(
-                                        move |bounds, _, cx| {
-                                            entity.update(cx, |this, _| {
-                                                this.width_track_bounds = Some(bounds)
-                                            })
-                                        },
-                                        |_, _, _, _| {},
-                                    )
-                                    .size_full(),
-                                )
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top(px(3.))
-                                        .left(gpui::relative(wfrac))
-                                        .ml(px(-14.0 * wfrac))
-                                        .w(px(14.))
-                                        .h(px(14.))
-                                        .rounded(px(7.))
-                                        .bg(rgba(u.accent)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .w(px(48.))
-                                .flex_none()
-                                .text_size(px(11.))
-                                .text_color(rgba(u.dim))
-                                .child(format!("{}px", cfg.width as i64)),
-                        )
-                },
+                "Sidebar size",
+                self.width_slider(
+                    "wslider",
+                    cfg.width,
+                    WIDTH_MIN,
+                    WIDTH_MAX,
+                    Drag::Width,
+                    u,
+                    cx,
+                ),
                 u,
             ))
             .child(div().pt(px(8.)).pb(px(4.)).text_color(rgba(u.text)).child("Edge"))
@@ -992,7 +1042,7 @@ impl Render for Settings {
         let active = self.active;
 
         let nav = div()
-            .w(px(150.))
+            .w(px(186.))
             .flex_none()
             .h_full()
             .bg(rgba(u.nav_bg))

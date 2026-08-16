@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2
 
 - **Omarchy theming**: the new `theme.variant = "omarchy"` (now the default)
   reads background, foreground, accent and light/dark from the current
@@ -8,10 +8,18 @@
   the panel live. Falls back to `system` when Omarchy isn't installed. The
   settings window picks up the same colors.
 - The centered Alt-Tab / Super+Tab overlay has its own width
-  (`overlay_width`, default 640px, in settings under Switching). The panel
-  width now only sizes the docked sidebar, so a narrow sidebar no longer
-  cramps window titles in the overlay.
+  (`overlay_width`, default 640px, in settings under Switching, on a
+  320–1200px slider with the same live preview as the sidebar width). The
+  panel width now only sizes the docked sidebar, so a narrow sidebar no
+  longer cramps window titles in the overlay.
 - The sidebar can be narrowed to 170px (was 240px).
+- Settings speaks plain language: the width controls are sliders labelled
+  Small / Medium / Large rather than pixel counts, "Switching" is now
+  "Window Switching", and the overlay is "Alt-Tab window size". The window
+  itself is 60px wider so the navigation labels fit.
+- Dragging the Alt-Tab window size previews it centered, where the overlay
+  really appears, and steps around the settings window so the slider stays
+  in view.
 - The search header shows the settings gear like every other mode, and drops
   the "type to filter" placeholder.
 

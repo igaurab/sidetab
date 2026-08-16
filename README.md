@@ -35,10 +35,10 @@ and hover-reveal at the screen edge. Built in Rust with
   every reveal, so switching themes or wallpapers restyles the panel with
   no restart. Falls back to your system light/dark preference elsewhere.
 - **Settings GUI** (`sidetab settings`), laid out like the Contexts
-  preferences: panel width (down to 170px), Alt-Tab overlay width, six
-  position presets plus a fine-tune slider with a mini screen preview (the
-  real panel moves live while you drag), hover behavior, delays, theme, and
-  pinned apps.
+  preferences: sidebar size (down to 170px) and Alt-Tab window size on
+  Small–Large sliders, six position presets plus a fine-tune slider with a
+  mini screen preview (the real panel moves live while you drag), hover
+  behavior, delays, theme, and pinned apps.
 
 ## Install
 
@@ -104,8 +104,10 @@ Settings are edited from the GUI (`sidetab settings`) or by hand in
 
 ```toml
 edge = "left"              # left | right
-width = 320.0              # docked sidebar (hover reveal, show, search)
-overlay_width = 640.0      # centered Alt-Tab / Super+Tab overlay
+width = 320.0              # docked sidebar (hover reveal, show, search),
+                           # 170..640 from the settings slider
+overlay_width = 640.0      # centered Alt-Tab / Super+Tab overlay,
+                           # 320..1200 from the settings slider
 v_pos = 0.5                # placement along the edge, 0.0 top .. 1.0 bottom
                            # (set it visually from the settings slider/preview)
 alt_tab = "all-workspaces"      # all-workspaces | current-workspace | disabled
