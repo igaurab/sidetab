@@ -1,7 +1,7 @@
 //! The switcher panel: a Contexts-style sidebar. Owns the presence state
 //! machine — every reveal/hide/focus transition funnels through here.
 
-use crate::config::{Config, CycleScope, Palette};
+use crate::config::{Config, CycleScope, Palette, CARD_ROUNDING};
 use crate::daemon::Msg;
 use crate::hypr::ctl;
 use crate::hypr::events::HyprEvent;
@@ -89,8 +89,20 @@ pub struct Switcher {
     scope: Scope,
     /// our own Hyprland window address (discovered after mapping)
     address: Option<String>,
-    /// live width-drag: window sits at WIDTH_MAX, card renders this wide
+    /// live width-drag: window sits at `width_preview_park`, card renders
+    /// this wide
     width_preview: Option<f32>,
+    /// window width held for the duration of a width drag (the slider's
+    /// maximum), so the card can grow without resizing the real window
+    width_preview_park: f32,
+    /// the width drag is steering the Alt-Tab overlay, so preview it where
+    /// the overlay actually appears — centered — not docked at the edge
+    preview_centered: bool,
+    /// (y, height) of the settings window during a centered preview. The
+    /// overlay lands dead center, which is exactly where the settings window
+    /// is, so the preview slides off center vertically to keep the slider
+    /// being dragged in view.
+    preview_avoid: Option<(f64, f64)>,
     fullscreen_active: bool,
     dirty: bool,
     /// the current reveal came from edge hover (auto-hides on leave)
@@ -144,6 +156,9 @@ impl Switcher {
             scope: Scope::All,
             address: None,
             width_preview: None,
+            width_preview_park: crate::config::WIDTH_MAX,
+            preview_centered: false,
+            preview_avoid: None,
             fullscreen_active: ctl::active_window_fullscreen(),
             dirty: true,
             hover_originated: false,
@@ -158,7 +173,7 @@ impl Switcher {
     }
 
     pub fn set_address(&mut self, address: String, cx: &mut Context<Self>) {
-        let _ = ctl::remove_border(&address);
+        let _ = ctl::remove_chrome(&address);
         self.address = Some(address);
         self.set_nofocus(true);
         // the freshly mapped window may have grabbed focus before the
@@ -334,20 +349,60 @@ impl Switcher {
     /// True while a cycling session should present as a centered overlay
     /// (macOS Cmd-Tab style) instead of the docked sidebar.
     fn centered(&self) -> bool {
-        self.mode == Mode::Cycling
+        self.mode == Mode::Cycling || self.preview_centered
+    }
+
+    /// Width the content card renders at. The centered Alt-Tab overlay has
+    /// its own width — the configured panel width only sizes the sidebar.
+    fn card_width(&self) -> f32 {
+        if let Some(w) = self.width_preview {
+            w
+        } else if self.centered() {
+            self.cfg.overlay_width
+        } else {
+            self.cfg.width
+        }
+    }
+
+    /// Vertical placement of the centered overlay: dead center, except while
+    /// previewing a width from the settings window, where dead center is
+    /// under the settings window itself. Then it goes to the roomier of the
+    /// bands above and below it, and only falls back to center if the
+    /// content is too tall to fit either.
+    fn centered_y(&self, mon: &ctl::Monitor, mh: f64, h: f64) -> f64 {
+        let center = mon.y as f64 + (mh - h) / 2.0;
+        let Some((sy, sh)) = self.preview_avoid else {
+            return center;
+        };
+        let top = mon.y as f64;
+        let above = sy - top;
+        let below = (top + mh) - (sy + sh);
+        let fits = |band: f64| band >= h + 16.0;
+        if fits(above) && above >= below {
+            top + (above - h) / 2.0
+        } else if fits(below) {
+            sy + sh + (below - h) / 2.0
+        } else if fits(above) {
+            top + (above - h) / 2.0
+        } else {
+            center
+        }
     }
 
     /// (revealed_x, hidden_x, y, w, h) in Hyprland logical layout coords.
     /// Height always fits the full content (clamped only by the monitor).
     fn geometry(&self, mon: &ctl::Monitor) -> (i64, i64, i64, i64, i64) {
         let (mw, mh) = mon.logical_size();
-        // during a width drag the real window parks at WIDTH_MAX once and
-        // only the content card resizes — per-event window resizes flicker
+        // during a width drag the real window parks at the slider maximum
+        // once and only the content card resizes — per-event window resizes
+        // flicker
         let w = if self.width_preview.is_some() {
-            crate::config::WIDTH_MAX as f64
+            self.width_preview_park as f64
         } else {
-            self.cfg.width as f64
-        };
+            self.card_width() as f64
+        }
+        // the overlay can be configured wider than a small monitor
+        .min(mw - 16.0);
         let h = (self.content_height() as f64 + 4.0).min(mh - 16.0);
         // Park entirely offscreen — hover detection is cursor-polling based,
         // so no visible sliver is needed (hover_strip_px is only the width
@@ -362,10 +417,7 @@ impl Switcher {
             )
         };
         let (x_shown, y) = if self.centered() {
-            (
-                mon.x as f64 + (mw - w) / 2.0,
-                mon.y as f64 + (mh - h) / 2.0,
-            )
+            (mon.x as f64 + (mw - w) / 2.0, self.centered_y(mon, mh, h))
         } else {
             // slide along the edge: 0 = top, 1 = bottom
             let frac = self.cfg.v_frac() as f64;
@@ -397,6 +449,13 @@ impl Switcher {
             self.refresh();
         }
         self.palette = self.cfg.theme.palette();
+        // A config reload (an Omarchy theme switch is one) wipes the
+        // runtime window rules, and a focused panel without them wears the
+        // theme's focus border. Re-assert on each reveal — the only time a
+        // border could show.
+        if let Some(addr) = &self.address {
+            let _ = ctl::remove_chrome(addr);
+        }
         self.place(true);
         // raising marks the panel allowed-over-fullscreen, so it shows
         // above fullscreen windows too
@@ -708,6 +767,15 @@ impl Switcher {
         match ev {
             HyprEvent::ConfigReloaded => {
                 let _ = ctl::apply_panel_rules();
+                // the rules above are only rules; the window still needs
+                // re-tagging to pick them up
+                if let Some(addr) = &self.address {
+                    let _ = ctl::remove_chrome(addr);
+                }
+                // Omarchy switches themes with a config reload; re-read the
+                // colors so a revealed panel restyles in place.
+                self.palette = self.cfg.theme.palette();
+                cx.notify();
                 if self.mode == Mode::Hidden {
                     self.set_nofocus(true);
                     self.park();
@@ -876,17 +944,31 @@ impl Switcher {
         self.reveal_now(cx);
     }
 
-    /// Live width-drag preview. The window is placed once at WIDTH_MAX;
-    /// each event only re-renders the content card at the new width —
-    /// resizing the real window per mouse move makes the client buffer
-    /// race the compositor and flicker.
-    pub fn preview_width(&mut self, w: f32, cx: &mut Context<Self>) {
-        self.cfg.width = w;
+    /// Live width-drag preview. The window is placed once at `park` (the
+    /// slider's maximum); each event only re-renders the content card at the
+    /// new width — resizing the real window per mouse move makes the client
+    /// buffer race the compositor and flicker.
+    /// `centered` previews the Alt-Tab overlay's width rather than the
+    /// sidebar's, so the panel shows up where the overlay really lands.
+    pub fn preview_width(
+        &mut self,
+        cfg: Config,
+        w: f32,
+        park: f32,
+        centered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.cfg = cfg;
         let first = self.width_preview.is_none();
+        self.width_preview_park = park;
         self.width_preview = Some(w);
+        self.preview_centered = centered;
         if first {
+            self.preview_avoid = centered.then(ctl::settings_window_band).flatten();
             self.preview_reveal(cx);
         }
+        // no re-place per step: the parked window is itself centered, so a
+        // card centered inside it stays centered on the monitor as it grows
         cx.notify();
     }
 
@@ -904,6 +986,9 @@ impl Switcher {
 
     pub fn preview_end(&mut self, cx: &mut Context<Self>) {
         self.width_preview = None;
+        // before rest(), which parks using the docked-edge geometry
+        self.preview_centered = false;
+        self.preview_avoid = None;
         if self.mode == Mode::Revealed {
             self.rest(cx);
         } else {
@@ -982,7 +1067,7 @@ impl Switcher {
             .items_center()
             .gap(px(8.))
             .px(px(8.))
-            .rounded(px(5.))
+            .rounded(px(6.))
             .when(selected, |d| {
                 d.bg(rgba(p.accent)).text_color(rgba(p.accent_text))
             })
@@ -1234,7 +1319,7 @@ impl Render for Switcher {
             } else {
                 8.0 + 24.0
             };
-            let x = f32::from(m.position.x).clamp(0.0, self.cfg.width - 150.0);
+            let x = f32::from(m.position.x).clamp(0.0, (self.card_width() - 150.0).max(0.0));
             let y = f32::from(m.position.y)
                 .min(self.content_height() - menu_h - 8.0)
                 .max(0.0);
@@ -1246,9 +1331,11 @@ impl Render for Switcher {
                 .w(px(140.))
                 .p(px(4.))
                 .rounded(px(8.))
+                // menus stay opaque: they float over the list, and a second
+                // translucent layer makes their labels unreadable
                 .bg(rgba((p.background & 0xffffff00) | 0xff))
                 .border_1()
-                .border_color(rgba(p.border))
+                .border_color(rgba(if p.dark { 0xffffff33 } else { 0x00000033 }))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.menu = None;
                     cx.notify();
@@ -1320,9 +1407,13 @@ impl Render for Switcher {
             .bg(rgba(p.background))
             .border_1()
             .border_color(rgba(p.border))
-            .when(self.centered(), |d| d.rounded(px(10.)))
-            .when(!self.centered() && left, |d| d.rounded_r(px(10.)))
-            .when(!self.centered() && !left, |d| d.rounded_l(px(10.)))
+            .when(self.centered(), |d| d.rounded(px(CARD_ROUNDING)))
+            .when(!self.centered() && left, |d| {
+                d.rounded_r(px(CARD_ROUNDING))
+            })
+            .when(!self.centered() && !left, |d| {
+                d.rounded_l(px(CARD_ROUNDING))
+            })
             .pt(px(PAD_V))
             .pb(px(PAD_V))
             .text_size(px(13.))
@@ -1352,47 +1443,49 @@ impl Render for Switcher {
                     // in search mode the typed query lives quietly in the
                     // header instead of a dedicated input box
                     .when(self.mode == Mode::Search, |d| {
-                        d.child(div().flex_none().text_color(rgba(p.text)).child(
-                            if self.query.is_empty() {
-                                "type to filter".to_string()
-                            } else {
-                                format!("{}▏", self.query)
-                            },
-                        ))
-                    })
-                    .when(self.mode != Mode::Search, |d| {
                         d.child(
                             div()
-                                .id("gear")
                                 .flex_none()
-                                .cursor_pointer()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|_, _, _, _| {
-                                        // routed through the control socket so the
-                                        // daemon pump owns the settings window
-                                        let _ = crate::client::send("settings");
-                                    }),
-                                )
-                                .child(
-                                    gpui::svg()
-                                        .path("icons/settings.svg")
-                                        .w(px(13.))
-                                        .h(px(13.))
-                                        .text_color(rgba(p.dim_text)),
-                                ),
+                                .mr(px(8.))
+                                .text_color(rgba(p.text))
+                                .child(format!("{}▏", self.query)),
                         )
-                    }),
+                    })
+                    // the gear stays put in every mode, search included
+                    .child(
+                        div()
+                            .id("gear")
+                            .flex_none()
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, _| {
+                                    // routed through the control socket so the
+                                    // daemon pump owns the settings window
+                                    let _ = crate::client::send("settings");
+                                }),
+                            )
+                            .child(
+                                gpui::svg()
+                                    .path("icons/settings.svg")
+                                    .w(px(13.))
+                                    .h(px(13.))
+                                    .text_color(rgba(p.dim_text)),
+                            ),
+                    ),
             )
             .child(list)
             .children(menu_overlay);
         // during a width drag the card renders at the dragged width inside
-        // the max-width window, anchored to the docked edge
+        // the max-width window, anchored to the docked edge — or centered,
+        // when it's the overlay's width being dragged
+        let centered = self.centered();
         match self.width_preview {
             Some(w) => div()
                 .size_full()
                 .flex()
-                .when(!left, |d| d.justify_end())
+                .when(centered, |d| d.justify_center())
+                .when(!centered && !left, |d| d.justify_end())
                 .child(card.w(px(w)))
                 .into_any_element(),
             None => card.w_full().into_any_element(),

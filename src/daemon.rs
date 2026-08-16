@@ -65,7 +65,7 @@ fn open_settings(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: gpui::point(px(0.), px(0.)),
-                    size: size(px(620.), px(600.)),
+                    size: size(px(680.), px(600.)),
                 })),
                 titlebar: None,
                 focus: true,
@@ -75,7 +75,7 @@ fn open_settings(
                 is_resizable: false,
                 is_minimizable: false,
                 window_background: WindowBackgroundAppearance::Opaque,
-                app_id: Some("sidetab-settings".into()),
+                app_id: Some(crate::hypr::ctl::SETTINGS_CLASS.into()),
                 ..Default::default()
             },
             |window, cx| {
