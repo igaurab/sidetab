@@ -184,17 +184,36 @@ pub fn dispatch(d: Dsp) -> Result<()> {
 /// discarding the reply. A misspelled Lua dispatcher is otherwise a silent
 /// no-op, which is exactly how a repair path fails without anyone noticing.
 pub fn dispatch_checked(d: Dsp) -> Result<()> {
-    let reply = request(&d.encode())?;
+    let cmd = d.encode();
+    let reply = request(&cmd)?;
     if reply.trim() == "ok" {
         Ok(())
     } else {
-        anyhow::bail!("hyprland rejected `{}`: {}", d.encode(), reply.trim())
+        anyhow::bail!("hyprland rejected `{cmd}`: {}", reply.trim())
     }
 }
 
 /// One connection, many dispatchers.
 pub fn dispatch_all(ds: &[Dsp]) -> Result<()> {
     batch(&ds.iter().map(Dsp::encode).collect::<Vec<_>>())
+}
+
+/// Like [`dispatch_all`], but fails unless Hyprland accepted every command.
+///
+/// A batch answers one reply per command joined by blank lines — `ok\n\n\nok`
+/// when both landed, and the offending entry replaced by `error: ...` when one
+/// did not. Callers that cache state on the result need to know the
+/// difference; a rejected dispatch is otherwise a silent no-op.
+pub fn dispatch_all_checked(ds: &[Dsp]) -> Result<()> {
+    let cmds: Vec<String> = ds.iter().map(Dsp::encode).collect();
+    if cmds.is_empty() {
+        return Ok(());
+    }
+    let reply = request(&format!("[[BATCH]]{}", cmds.join(";")))?;
+    if let Some(bad) = reply.split("\n\n\n").find(|r| r.trim() != "ok") {
+        anyhow::bail!("hyprland rejected a dispatch: {}", bad.trim());
+    }
+    Ok(())
 }
 
 /// Re-read the Hyprland config. Both parsers accept this verbatim.
@@ -250,11 +269,16 @@ pub fn clients() -> Result<Vec<Client>> {
 /// the first `sidetab` window would then drive the wrong one.
 pub fn own_address() -> Option<String> {
     let me = std::process::id() as i64;
-    clients()
-        .ok()?
-        .into_iter()
+    let clients = clients().ok()?;
+    clients
+        .iter()
         .find(|c| c.class == PANEL_CLASS && c.pid == me)
-        .map(|c| c.address)
+        // `pid` is `#[serde(default)]`, so never make discovery depend on it:
+        // without this fallback a Hyprland that omitted the field would leave
+        // the panel address unset, and with it every placement, for the whole
+        // session.
+        .or_else(|| clients.iter().find(|c| c.class == PANEL_CLASS))
+        .map(|c| c.address.clone())
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -323,9 +347,11 @@ pub fn active_address() -> Option<String> {
         .and_then(|w| w.address)
 }
 
-/// Rules that make the panel behave: floating,
-/// chromeless, instant, and never taking keyboard focus (hover must not
-/// steal focus with follow_mouse=1). Re-applied on configreloaded.
+/// Rules that make the panel behave: floating, chromeless, instant, and never
+/// taking keyboard focus (hover must not steal focus with follow_mouse=1).
+/// Re-applied on configreloaded.
+///
+/// Notably *not* pinned: see [`crate::ui::panel::Switcher::place`].
 pub fn apply_panel_rules() -> Result<()> {
     let rounding = crate::config::CARD_ROUNDING as i64;
     // (legacy rule body, Lua rule table) — the same rule in both spellings.
@@ -383,7 +409,6 @@ pub fn apply_panel_rules() -> Result<()> {
 /// the active workspace *of its own monitor*, so a pinned window on an orphan
 /// is pinned to nothing and stays invisible and input-dead forever. Moving it
 /// back is the only fix.
-///
 pub fn reanchor(address: &str, workspace: i64) -> Result<()> {
     dispatch_checked(Dsp::MoveToWorkspaceSilent {
         ws: workspace,

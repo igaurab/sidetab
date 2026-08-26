@@ -305,10 +305,14 @@ impl Switcher {
         }
 
         let Ok(target) = ctl::focused_monitor() else {
+            // Still stranded: leave the throttle disarmed so the next reveal
+            // retries rather than trusting this failed look for 5s.
+            self.last_anchor_check = None;
             return Anchor::Unknown;
         };
         if let Err(e) = ctl::reanchor(&addr, target.active_workspace.id) {
             eprintln!("sidetab: could not re-anchor the stranded panel: {e:#}");
+            self.last_anchor_check = None;
             return Anchor::Unknown;
         }
         self.panel_ws = Some(target.active_workspace.id);
@@ -639,8 +643,16 @@ impl Switcher {
             y,
             addr: &addr,
         });
-        if ctl::dispatch_all(&ds).is_ok() && move_ws {
-            self.panel_ws = Some(target_ws);
+        if !move_ws {
+            let _ = ctl::dispatch_all(&ds);
+            return;
+        }
+        // Checked, because the cache below suppresses every later attempt: a
+        // rejected move that we recorded as done would silently strand the
+        // panel on the workspace it was already on.
+        match ctl::dispatch_all_checked(&ds) {
+            Ok(()) => self.panel_ws = Some(target_ws),
+            Err(e) => eprintln!("sidetab: could not move the panel to workspace {target_ws}: {e:#}"),
         }
     }
 
@@ -1031,7 +1043,11 @@ impl Switcher {
                     self.place(true);
                     cx.notify();
                 }
-                Mode::Cycling => {}
+                // `pin` used to carry the panel across workspaces on its
+                // own; now only `place` does, so an Alt-Tab held across a
+                // workspace change would otherwise leave the overlay behind
+                // on the old one and the user would commit blind.
+                Mode::Cycling => self.place(true),
             },
             HyprEvent::ActiveWindowChanged => {
                 self.fullscreen_active = ctl::active_window_fullscreen();

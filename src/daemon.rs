@@ -188,7 +188,6 @@ pub fn run() -> Result<()> {
                     Item::Event(ev) => Msg::Event(ev),
                     Item::Ctl(mut ctl) => match ctl.cmd.as_str() {
                         "quit" => {
-                            reply_to(ctl.reply.take(), "bye");
                             let _ = cx.update(|cx| cx.quit());
                             return;
                         }

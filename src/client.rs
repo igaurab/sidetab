@@ -32,10 +32,14 @@ pub fn send(command: &str) -> Result<()> {
 }
 
 
-/// How long a healthy daemon gets to answer `ping`. The reply is produced on
-/// the gpui main thread after two local Hyprland round-trips, so this is
-/// orders of magnitude more than it needs.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+/// How long a healthy daemon gets to answer `ping`.
+///
+/// A healthy answer takes ~2ms, but the handler runs the anchor check on the
+/// gpui main thread, and each Hyprland round-trip it makes is itself bounded
+/// by `ctl::READ_TIMEOUT` — so a slow-but-alive compositor (exactly the
+/// post-suspend case this feature exists for) can legitimately take seconds.
+/// This budget has to exceed the daemon's, or a healthy daemon gets killed.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Round-trip the daemon's health check. `Err` means it is not pumping.
 pub fn probe(timeout: Duration) -> Result<String> {
@@ -56,13 +60,30 @@ pub fn probe(timeout: Duration) -> Result<String> {
     Ok(reply.trim().to_string())
 }
 
-/// The running daemon's pid, but only if that pid is still a live sidetab.
-/// `panic = "abort"` means the pid file can outlive its process, and pids get
-/// reused.
+fn is_live_daemon(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sidetab")
+}
+
+/// The running daemon's pid.
+///
+/// The pid file is the fast path, but it cannot be the only one: `panic =
+/// "abort"` means it can outlive its process, and a daemon from before it
+/// existed has none at all. Falling back to a `/proc` scan matters because the
+/// caller spawns a replacement — without a pid to stop, an upgrade would leave
+/// two daemons fighting over one panel.
 fn daemon_pid() -> Option<u32> {
-    let pid: u32 = std::fs::read_to_string(pid_path()).ok()?.trim().parse().ok()?;
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    (comm.trim() == "sidetab").then_some(pid)
+    let me = std::process::id();
+    if let Some(pid) = std::fs::read_to_string(pid_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&p| p != me && is_live_daemon(p))
+    {
+        return Some(pid);
+    }
+    std::fs::read_dir("/proc")
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .find(|&pid| pid != me && is_live_daemon(pid))
 }
 
 fn wait_until(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -123,6 +144,12 @@ fn do_restart() -> Result<()> {
             wait_until(Duration::from_secs(1), || !alive());
         }
     }
+    // Spawning on top of a daemon we failed to stop is worse than doing
+    // nothing: the survivor keeps its panel window but loses its socket, so it
+    // is unreachable and un-killable by every later command.
+    if let Some(pid) = daemon_pid() {
+        bail!("a sidetab daemon (pid {pid}) is still running and would not stop; kill it and retry");
+    }
     // The dead daemon left these bound/behind; a fresh bind needs them gone.
     let _ = std::fs::remove_file(socket_path());
     let _ = std::fs::remove_file(pid_path());
@@ -156,9 +183,20 @@ pub fn send_checked(command: &str) -> Result<()> {
         return send(command);
     }
     match probe(PROBE_TIMEOUT) {
-        // `pong lost` means the daemon is pumping but its window is gone,
-        // which it cannot repair from the inside.
-        Ok(reply) if reply.starts_with("pong") && reply != "pong lost" => {
+        // The daemon is pumping but has no panel window; only a restart can
+        // give it one back.
+        Ok(reply) if reply == "pong lost" || reply == "pong window-gone" => {
+            eprintln!("sidetab: the panel window is gone — restarting the daemon");
+            restart()?;
+            send(command)
+        }
+        // Hyprland is the one not answering. Restarting sidetab would not fix
+        // that and would throw away the session's state for nothing.
+        Ok(reply) if reply == "pong hypr-unreachable" => {
+            eprintln!("sidetab: hyprland is not answering; leaving the daemon alone");
+            send(command)
+        }
+        Ok(reply) if reply.starts_with("pong") => {
             if reply != "pong ok" {
                 eprintln!("sidetab: daemon reports '{reply}'");
             }
