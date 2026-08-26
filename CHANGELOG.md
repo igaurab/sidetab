@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.3
+
+Install without compiling.
+
+- **Prebuilt binaries.** `cargo install sidetab` builds around 1450 crates —
+  gpui's dependency tree is enormous — for a binary that is identical for
+  everyone. There are now two ways to skip that: `yay -S sidetab-bin` on Arch
+  and Omarchy, or `cargo binstall sidetab` anywhere else. Both fetch the
+  binary attached to this release. Building from source still works.
+- The binaries are built against glibc 2.35 so they run on anything newer, and
+  are tested on Omarchy 4 (Hyprland 0.56).
+
+No changes to sidetab itself — 0.2.2's fixes are the current behaviour.
+
 ## 0.2.2
 
 ### Fixed
