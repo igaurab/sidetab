@@ -323,7 +323,7 @@ pub fn active_address() -> Option<String> {
         .and_then(|w| w.address)
 }
 
-/// Rules that make the panel behave: floating, pinned across workspaces,
+/// Rules that make the panel behave: floating,
 /// chromeless, instant, and never taking keyboard focus (hover must not
 /// steal focus with follow_mouse=1). Re-applied on configreloaded.
 pub fn apply_panel_rules() -> Result<()> {
@@ -334,8 +334,6 @@ pub fn apply_panel_rules() -> Result<()> {
     let rules = [
         ("float on, match:class sidetab".to_string(),
          "{ float = true, match = { class = '^sidetab$' } }".to_string()),
-        ("pin on, match:class sidetab".to_string(),
-         "{ pin = true, match = { class = '^sidetab$' } }".to_string()),
         ("no_anim on, match:class sidetab".to_string(),
          "{ no_anim = true, match = { class = '^sidetab$' } }".to_string()),
         // no_focus is tag-scoped so the daemon can lift it for search mode
@@ -386,24 +384,11 @@ pub fn apply_panel_rules() -> Result<()> {
 /// is pinned to nothing and stays invisible and input-dead forever. Moving it
 /// back is the only fix.
 ///
-/// `was_pinned` comes from [`Client::pinned`] because [`Dsp::TogglePin`] is a
-/// bare toggle; the move usually preserves the flag, but Hyprland clears it on
-/// some workspace moves, so the result is read back rather than assumed.
-pub fn reanchor(address: &str, workspace: i64, was_pinned: bool) -> Result<()> {
+pub fn reanchor(address: &str, workspace: i64) -> Result<()> {
     dispatch_checked(Dsp::MoveToWorkspaceSilent {
         ws: workspace,
         addr: address,
-    })?;
-    if was_pinned {
-        let still_pinned = clients()
-            .ok()
-            .and_then(|cs| cs.into_iter().find(|c| c.address == address))
-            .is_some_and(|c| c.pinned);
-        if !still_pinned {
-            let _ = dispatch(Dsp::TogglePin(address));
-        }
-    }
-    Ok(())
+    })
 }
 
 pub const CHROMELESS_TAG: &str = "sidetab-chromeless";

@@ -104,6 +104,9 @@ pub struct Switcher {
     address: Option<String>,
     /// last time `ensure_anchored` actually queried Hyprland, for throttling
     last_anchor_check: Option<Instant>,
+    /// workspace the panel was last moved to. Cached because `place` runs on
+    /// every reveal/park and must not ask Hyprland where its own window is.
+    panel_ws: Option<i64>,
     /// live width-drag: window sits at `width_preview_park`, card renders
     /// this wide
     width_preview: Option<f32>,
@@ -162,7 +165,10 @@ impl Switcher {
                 .timer(Duration::from_secs(15))
                 .await;
             let alive = this.update(cx, |this, cx| {
-                if this.mode == Mode::Hidden && this.address.is_some() {
+                // Not gated on `address`: ensure_anchored clears it when the
+                // window vanishes from the client list, and its pid fallback
+                // is then the only thing that can find the window again.
+                if this.mode == Mode::Hidden {
                     this.ensure_anchored(cx);
                 }
             });
@@ -190,6 +196,7 @@ impl Switcher {
             scope: Scope::All,
             address: None,
             last_anchor_check: None,
+            panel_ws: None,
             width_preview: None,
             width_preview_park: crate::config::WIDTH_MAX,
             preview_centered: false,
@@ -210,6 +217,11 @@ impl Switcher {
     pub fn set_address(&mut self, address: String, cx: &mut Context<Self>) {
         let _ = ctl::remove_chrome(&address);
         self.address = Some(address);
+        // sidetab used to keep the panel pinned, and a `keyword` rule from an
+        // earlier daemon stays registered with Hyprland until a config reload
+        // — so on upgrade this window can still map pinned, bringing back the
+        // workspace-switch flicker `place` now avoids. Clear it once here.
+        self.unpin_self();
         self.set_nofocus(true);
         // the freshly mapped window may have grabbed focus before the
         // nofocus tag landed — give it back
@@ -263,8 +275,10 @@ impl Switcher {
             })
         else {
             // The surface is gone; gpui owns it, so there is nothing to
-            // repair from in here.
+            // repair from in here. Clearing the address lets the pid fallback
+            // above adopt the window if it comes back.
             self.address = None;
+            self.panel_ws = None;
             return Anchor::Lost;
         };
 
@@ -273,7 +287,16 @@ impl Switcher {
         // the -1 sentinel.
         let live = mine.monitor >= 0 && mons.iter().any(|m| m.id == mine.monitor);
         let addr = mine.address.clone();
-        let was_pinned = mine.pinned;
+        let pinned = mine.pinned;
+        // This is the only place that learns where the window really is, so
+        // it is also where the cache `place` relies on gets reconciled.
+        self.panel_ws = Some(mine.workspace.id);
+        // The panel must never be pinned — see `place`. A rule from an older
+        // sidetab stays registered with Hyprland until a config reload, so
+        // this can come back at runtime.
+        if pinned {
+            let _ = ctl::dispatch(ctl::Dsp::TogglePin(&addr));
+        }
         if self.address.as_ref() != Some(&addr) {
             self.address = Some(addr.clone());
         }
@@ -284,10 +307,11 @@ impl Switcher {
         let Ok(target) = ctl::focused_monitor() else {
             return Anchor::Unknown;
         };
-        if let Err(e) = ctl::reanchor(&addr, target.active_workspace.id, was_pinned) {
+        if let Err(e) = ctl::reanchor(&addr, target.active_workspace.id) {
             eprintln!("sidetab: could not re-anchor the stranded panel: {e:#}");
             return Anchor::Unknown;
         }
+        self.panel_ws = Some(target.active_workspace.id);
         // The move re-maps the window, which drops the keyword-applied rules.
         let _ = ctl::remove_chrome(&addr);
         let revealed = self.mode != Mode::Hidden;
@@ -314,6 +338,22 @@ impl Switcher {
             Anchor::Unknown => "pong hypr-unreachable",
         }
         .to_string()
+    }
+
+    /// Drop a stale `pin` on our own window; see [`Switcher::place`] for why
+    /// the panel must not be pinned.
+    fn unpin_self(&mut self) {
+        let Some(addr) = self.address.clone() else {
+            return;
+        };
+        let Ok(clients) = ctl::clients() else { return };
+        let Some(me) = clients.iter().find(|c| c.address == addr) else {
+            return;
+        };
+        self.panel_ws = Some(me.workspace.id);
+        if me.pinned {
+            let _ = ctl::dispatch(ctl::Dsp::TogglePin(&addr));
+        }
     }
 
     fn set_nofocus(&self, on: bool) {
@@ -567,18 +607,41 @@ impl Switcher {
         };
         let (x_shown, x_hidden, y, w, h) = self.geometry(&mon);
         let x = if revealed { x_shown } else { x_hidden };
-        let _ = ctl::dispatch_all(&[
-            ctl::Dsp::ResizeExact {
-                w,
-                h,
+        let target_ws = mon.active_workspace.id;
+
+        // Follow the active workspace by moving the panel ourselves, batched
+        // with the placement below so it lands in a single frame.
+        //
+        // The `pin` rule used to do this, and it is why the panel flickered on
+        // every workspace switch: Hyprland re-homes a pinned window onto the
+        // new workspace and clamps it back into the monitor, so the parked
+        // panel snapped to x=0 — fully on screen — for a frame or more before
+        // sidetab could shove it off again.
+        //
+        // Guarded on the cached workspace, not issued unconditionally: a
+        // redundant move still emits `movewindow`, which comes back as
+        // WindowsChanged -> park -> place and would spin forever.
+        let move_ws = self.panel_ws != Some(target_ws) && target_ws > 0;
+        let mut ds = Vec::with_capacity(3);
+        if move_ws {
+            ds.push(ctl::Dsp::MoveToWorkspaceSilent {
+                ws: target_ws,
                 addr: &addr,
-            },
-            ctl::Dsp::MoveExact {
-                x,
-                y,
-                addr: &addr,
-            },
-        ]);
+            });
+        }
+        ds.push(ctl::Dsp::ResizeExact {
+            w,
+            h,
+            addr: &addr,
+        });
+        ds.push(ctl::Dsp::MoveExact {
+            x,
+            y,
+            addr: &addr,
+        });
+        if ctl::dispatch_all(&ds).is_ok() && move_ws {
+            self.panel_ws = Some(target_ws);
+        }
     }
 
     fn park(&mut self) {
@@ -946,23 +1009,12 @@ impl Switcher {
             HyprEvent::WindowsChanged => match self.mode {
                 Mode::Hidden | Mode::HoverPending => {
                     self.dirty = true;
-                    // Hyprland relocates the pinned panel into view when
-                    // switching to an empty workspace — shove it back
-                    // offscreen now, and once more shortly after in case
-                    // the relocation lands after this event
+                    // `park` also carries the panel to the active workspace
+                    // now (see `place`). The delayed second park that used to
+                    // live here was chasing the `pin` relocation, which no
+                    // longer happens — and the 200ms it stayed on screen was
+                    // the flicker.
                     self.park();
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(200))
-                            .await;
-                        this.update(cx, |this, _| {
-                            if matches!(this.mode, Mode::Hidden | Mode::HoverPending) {
-                                this.park();
-                            }
-                        })
-                        .ok();
-                    })
-                    .detach();
                 }
                 Mode::Revealed | Mode::Search => {
                     let keep = self.selected_entry().map(|e| e.address.clone());

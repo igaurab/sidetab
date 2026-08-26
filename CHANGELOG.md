@@ -15,6 +15,13 @@
   and only restarting the daemon brought it back. sidetab now watches the
   monitor events (it dropped them entirely before) and moves its window back
   onto a live workspace, so this recovers on its own.
+- **No more flicker when switching workspaces.** The panel used to be pinned so
+  that it followed you between workspaces, but Hyprland re-homes a pinned
+  window onto the new workspace and clamps it back inside the monitor — so the
+  parked panel snapped fully on screen for a frame or two on every switch,
+  before sidetab could shove it off again. It now follows workspaces by moving
+  itself, batched with the placement so it lands in one frame and never appears
+  on screen. (A `pin` left over from an older sidetab is cleared automatically.)
 - The settings window failing to open is reported instead of silently doing
   nothing, and a stale handle from a closed window no longer suppresses
   re-opening it.
