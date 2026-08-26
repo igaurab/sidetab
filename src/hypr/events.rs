@@ -13,6 +13,13 @@ pub enum HyprEvent {
     ActiveWindowChanged,
     WindowTitle { address: String },
     FullscreenChanged(bool),
+    /// A monitor was added or removed. Rare, and the one moment at which the
+    /// panel can be orphaned onto a workspace that no longer has a monitor.
+    MonitorsChanged,
+    /// Focus moved to another monitor. Fires on ordinary pointer motion across
+    /// a monitor edge, so it is kept separate from [`Self::MonitorsChanged`] —
+    /// it must never force a `clients()` round-trip.
+    FocusedMonitorChanged,
     ConfigReloaded,
 }
 
@@ -30,6 +37,10 @@ fn parse_line(line: &str) -> Option<HyprEvent> {
             })
         }
         "fullscreen" => Some(HyprEvent::FullscreenChanged(data.trim() == "1")),
+        "monitoradded" | "monitoraddedv2" | "monitorremoved" | "monitorremovedv2" => {
+            Some(HyprEvent::MonitorsChanged)
+        }
+        "focusedmon" | "focusedmonv2" => Some(HyprEvent::FocusedMonitorChanged),
         "configreloaded" => Some(HyprEvent::ConfigReloaded),
         _ => None,
     }

@@ -5,12 +5,24 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
+
+/// Every reply on this socket is local and sub-millisecond, so these bounds
+/// only ever fire on a compositor that has stopped answering. Without them a
+/// half-open socket (the classic post-suspend case) parks the *main thread*
+/// forever, since `poll_edge`, `place` and `refresh` all call this inline.
+const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+const READ_TIMEOUT: Duration = Duration::from_millis(1000);
 
 fn request(cmd: &str) -> Result<String> {
     let dir = super::instance_dir().context("no running Hyprland instance found")?;
     let mut stream = UnixStream::connect(dir.join(".socket.sock"))?;
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
     stream.write_all(cmd.as_bytes())?;
     let mut buf = String::new();
+    // A timeout surfaces as Err(WouldBlock); every caller already treats Err
+    // as "skip this tick" rather than retrying.
     stream.read_to_string(&mut buf)?;
     Ok(buf)
 }
@@ -57,6 +69,11 @@ pub enum Dsp<'a> {
     ResizeExact { w: i64, h: i64, addr: &'a str },
     MoveExact { x: i64, y: i64, addr: &'a str },
     Tag { add: bool, tag: &'a str, addr: &'a str },
+    /// Re-home a window onto `ws` without following it there.
+    MoveToWorkspaceSilent { ws: i64, addr: &'a str },
+    /// Hyprland's `pin` takes no on/off argument in either spelling — it is a
+    /// bare toggle, so callers must read `Client::pinned` first.
+    TogglePin(&'a str),
     FocusWindow(&'a str),
     FocusCurrentOrLast,
     RaiseWindow(&'a str),
@@ -81,6 +98,10 @@ impl Dsp<'_> {
                 let sign = if *add { '+' } else { '-' };
                 format!("dispatch tagwindow {sign}{tag} address:{addr}")
             }
+            Dsp::MoveToWorkspaceSilent { ws, addr } => {
+                format!("dispatch movetoworkspacesilent {ws},address:{addr}")
+            }
+            Dsp::TogglePin(addr) => format!("dispatch pin address:{addr}"),
             Dsp::FocusWindow(addr) => format!("dispatch focuswindow address:{addr}"),
             Dsp::FocusCurrentOrLast => "dispatch focuscurrentorlast".into(),
             Dsp::RaiseWindow(addr) => format!("dispatch alterzorder top,address:{addr}"),
@@ -121,6 +142,11 @@ impl Dsp<'_> {
                     win(addr)
                 )
             }
+            Dsp::MoveToWorkspaceSilent { ws, addr } => format!(
+                "dispatch hl.dsp.window.move({{ workspace = {ws}, silent = true, {} }})",
+                win(addr)
+            ),
+            Dsp::TogglePin(addr) => format!("dispatch hl.dsp.window.pin({{ {} }})", win(addr)),
             Dsp::FocusWindow(addr) => format!("dispatch hl.dsp.focus({{ {} }})", win(addr)),
             // The Lua focus dispatcher has no current-or-last toggle; `last`
             // is the same motion for the one case sidetab uses it in.
@@ -152,6 +178,18 @@ impl Dsp<'_> {
 
 pub fn dispatch(d: Dsp) -> Result<()> {
     request(&d.encode()).map(|_| ())
+}
+
+/// Like [`dispatch`], but fails when Hyprland rejects the command instead of
+/// discarding the reply. A misspelled Lua dispatcher is otherwise a silent
+/// no-op, which is exactly how a repair path fails without anyone noticing.
+pub fn dispatch_checked(d: Dsp) -> Result<()> {
+    let reply = request(&d.encode())?;
+    if reply.trim() == "ok" {
+        Ok(())
+    } else {
+        anyhow::bail!("hyprland rejected `{}`: {}", d.encode(), reply.trim())
+    }
 }
 
 /// One connection, many dispatchers.
@@ -205,6 +243,18 @@ pub struct WorkspaceRef {
 pub fn clients() -> Result<Vec<Client>> {
     let raw = request("j/clients")?;
     Ok(serde_json::from_str(&raw)?)
+}
+
+/// Our own panel window's address. Matched on pid as well as class: a panel
+/// stranded by an earlier daemon can still be in the client list, and picking
+/// the first `sidetab` window would then drive the wrong one.
+pub fn own_address() -> Option<String> {
+    let me = std::process::id() as i64;
+    clients()
+        .ok()?
+        .into_iter()
+        .find(|c| c.class == PANEL_CLASS && c.pid == me)
+        .map(|c| c.address)
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -327,7 +377,39 @@ pub fn apply_panel_rules() -> Result<()> {
     batch(&cmds)
 }
 
+/// Re-home a window onto a live workspace.
+///
+/// A monitor unplug (screen lock, DPMS, KVM switch, undock) orphans that
+/// monitor's workspaces — Hyprland reports them as `monitor: -1` — and takes
+/// any window on them along. `pin` is no rescue: it only makes a window follow
+/// the active workspace *of its own monitor*, so a pinned window on an orphan
+/// is pinned to nothing and stays invisible and input-dead forever. Moving it
+/// back is the only fix.
+///
+/// `was_pinned` comes from [`Client::pinned`] because [`Dsp::TogglePin`] is a
+/// bare toggle; the move usually preserves the flag, but Hyprland clears it on
+/// some workspace moves, so the result is read back rather than assumed.
+pub fn reanchor(address: &str, workspace: i64, was_pinned: bool) -> Result<()> {
+    dispatch_checked(Dsp::MoveToWorkspaceSilent {
+        ws: workspace,
+        addr: address,
+    })?;
+    if was_pinned {
+        let still_pinned = clients()
+            .ok()
+            .and_then(|cs| cs.into_iter().find(|c| c.address == address))
+            .is_some_and(|c| c.pinned);
+        if !still_pinned {
+            let _ = dispatch(Dsp::TogglePin(address));
+        }
+    }
+    Ok(())
+}
+
 pub const CHROMELESS_TAG: &str = "sidetab-chromeless";
+
+/// Wayland app_id of the panel window (see daemon::run).
+pub const PANEL_CLASS: &str = "sidetab";
 
 /// Wayland app_id of the settings window (see daemon::run).
 pub const SETTINGS_CLASS: &str = "sidetab-settings";

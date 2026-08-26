@@ -10,9 +10,22 @@ use crate::windows::{self, Group, WinEntry};
 use gpui::{
     div, img, prelude::*, px, rgba, Context, FocusHandle, KeyDownEvent, MouseButton, Window,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const NOFOCUS_TAG: &str = "sidetab-nofocus";
+
+/// Outcome of the panel's "am I still on a real monitor?" check.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Anchor {
+    /// On a live monitor.
+    Ok,
+    /// Was stranded, and has been moved back.
+    Repaired,
+    /// Our window is not in the client list at all.
+    Lost,
+    /// Hyprland did not answer.
+    Unknown,
+}
 
 const ROW_H: f32 = 26.0;
 const GROUP_HEADER_H: f32 = 24.0;
@@ -89,6 +102,8 @@ pub struct Switcher {
     scope: Scope,
     /// our own Hyprland window address (discovered after mapping)
     address: Option<String>,
+    /// last time `ensure_anchored` actually queried Hyprland, for throttling
+    last_anchor_check: Option<Instant>,
     /// live width-drag: window sits at `width_preview_park`, card renders
     /// this wide
     width_preview: Option<f32>,
@@ -137,6 +152,25 @@ impl Switcher {
             }
         })
         .detach();
+        // Slow safety net for a stranding whose monitor events we never saw —
+        // the event socket can be down across the very unplug that causes it.
+        // Deliberately not folded into poll_edge above: that loop already
+        // makes two blocking Hyprland round-trips every 180ms on the main
+        // thread, and this adds one every 15s, ~1/166th the traffic.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(15))
+                .await;
+            let alive = this.update(cx, |this, cx| {
+                if this.mode == Mode::Hidden && this.address.is_some() {
+                    this.ensure_anchored(cx);
+                }
+            });
+            if alive.is_err() {
+                return;
+            }
+        })
+        .detach();
         let palette = cfg.theme.palette();
         Switcher {
             cfg,
@@ -155,6 +189,7 @@ impl Switcher {
             mode: Mode::Hidden,
             scope: Scope::All,
             address: None,
+            last_anchor_check: None,
             width_preview: None,
             width_preview_park: crate::config::WIDTH_MAX,
             preview_centered: false,
@@ -182,6 +217,103 @@ impl Switcher {
             let _ = ctl::focus_current_or_last();
         }
         self.rest(cx);
+    }
+
+    /// Minimum gap between two real anchor checks on the reveal path.
+    const ANCHOR_THROTTLE: Duration = Duration::from_secs(5);
+
+    /// Cheap wrapper for hot-ish paths: skips the round-trips if we looked
+    /// recently.
+    fn ensure_anchored_throttled(&mut self, cx: &mut Context<Self>) -> Anchor {
+        match self.last_anchor_check {
+            Some(t) if t.elapsed() < Self::ANCHOR_THROTTLE => Anchor::Ok,
+            _ => self.ensure_anchored(cx),
+        }
+    }
+
+    /// The invariant: our window exists, and it lives on a workspace that
+    /// belongs to a live monitor.
+    ///
+    /// A monitor unplug orphans that monitor's workspaces (`monitor: -1`) and
+    /// takes the panel with them. Nothing recovers on its own — `pin` only
+    /// follows the active workspace of a window's *own* monitor — so the panel
+    /// stays invisible and input-dead while the daemon happily keeps moving it
+    /// around a workspace nobody can see. See [`ctl::reanchor`].
+    ///
+    /// Costs two Hyprland round-trips on the main thread; never call it from
+    /// `poll_edge`.
+    fn ensure_anchored(&mut self, cx: &mut Context<Self>) -> Anchor {
+        self.last_anchor_check = Some(Instant::now());
+        let (Ok(clients), Ok(mons)) = (ctl::clients(), ctl::monitors()) else {
+            // Hyprland unreachable — don't let a failed probe start the
+            // throttle, or we skip the next real check too.
+            self.last_anchor_check = None;
+            return Anchor::Unknown;
+        };
+
+        let me = std::process::id() as i64;
+        let Some(mine) = self
+            .address
+            .as_ref()
+            .and_then(|a| clients.iter().find(|c| &c.address == a))
+            .or_else(|| {
+                clients
+                    .iter()
+                    .find(|c| c.class == ctl::PANEL_CLASS && c.pid == me)
+            })
+        else {
+            // The surface is gone; gpui owns it, so there is nothing to
+            // repair from in here.
+            self.address = None;
+            return Anchor::Lost;
+        };
+
+        // A monitor that is removed and re-added comes back with a *new* id,
+        // so a stale id can outlive its monitor — check membership, not just
+        // the -1 sentinel.
+        let live = mine.monitor >= 0 && mons.iter().any(|m| m.id == mine.monitor);
+        let addr = mine.address.clone();
+        let was_pinned = mine.pinned;
+        if self.address.as_ref() != Some(&addr) {
+            self.address = Some(addr.clone());
+        }
+        if live {
+            return Anchor::Ok;
+        }
+
+        let Ok(target) = ctl::focused_monitor() else {
+            return Anchor::Unknown;
+        };
+        if let Err(e) = ctl::reanchor(&addr, target.active_workspace.id, was_pinned) {
+            eprintln!("sidetab: could not re-anchor the stranded panel: {e:#}");
+            return Anchor::Unknown;
+        }
+        // The move re-maps the window, which drops the keyword-applied rules.
+        let _ = ctl::remove_chrome(&addr);
+        let revealed = self.mode != Mode::Hidden;
+        self.set_nofocus(!revealed);
+        self.place(revealed);
+        cx.notify();
+        eprintln!(
+            "sidetab: panel was stranded on a workspace with no monitor; \
+             re-anchored to workspace {} on {}",
+            target.active_workspace.id, target.name
+        );
+        Anchor::Repaired
+    }
+
+    /// Answer for the `ping` control command. Deliberately runs the real
+    /// invariant check rather than reporting a bare "I'm alive": the daemon
+    /// stays perfectly healthy while the panel is stranded, so thread
+    /// liveness on its own says nothing useful.
+    pub fn health_check(&mut self, cx: &mut Context<Self>) -> String {
+        match self.ensure_anchored(cx) {
+            Anchor::Ok => "pong ok",
+            Anchor::Repaired => "pong repaired",
+            Anchor::Lost => "pong lost",
+            Anchor::Unknown => "pong hypr-unreachable",
+        }
+        .to_string()
     }
 
     fn set_nofocus(&self, on: bool) {
@@ -456,6 +588,10 @@ impl Switcher {
     // ---- presence transitions ----
 
     fn reveal_now(&mut self, cx: &mut Context<Self>) {
+        // Every reveal path funnels through here, so this one call self-heals
+        // a stranded panel on any user-visible action. Throttled: in the
+        // common case it costs nothing.
+        self.ensure_anchored_throttled(cx);
         if self.dirty {
             self.refresh();
         }
@@ -768,7 +904,28 @@ impl Switcher {
 
     fn handle_event(&mut self, ev: HyprEvent, cx: &mut Context<Self>) {
         match ev {
+            // The moment the panel can be orphaned: a monitor going away takes
+            // its workspaces — and anything on them — with it.
+            HyprEvent::MonitorsChanged => {
+                self.ensure_anchored(cx);
+                if self.mode == Mode::Hidden {
+                    self.park();
+                } else {
+                    self.place(true);
+                }
+            }
+            // Fires on ordinary pointer motion across a monitor edge, so this
+            // one is throttled.
+            HyprEvent::FocusedMonitorChanged => {
+                self.ensure_anchored_throttled(cx);
+                if self.mode == Mode::Hidden {
+                    self.park();
+                }
+            }
             HyprEvent::ConfigReloaded => {
+                // Also synthesized after an event-socket EOF, i.e. exactly the
+                // case where monitor events may have been missed.
+                self.ensure_anchored(cx);
                 let _ = ctl::apply_panel_rules();
                 // the rules above are only rules; the window still needs
                 // re-tagging to pick them up

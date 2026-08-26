@@ -87,14 +87,6 @@ fn open_settings(
     Ok(handle)
 }
 
-/// Our window's Hyprland address, once it has mapped.
-fn find_own_address() -> Option<String> {
-    ctl::clients()
-        .ok()?
-        .into_iter()
-        .find(|c| c.class == "sidetab")
-        .map(|c| c.address)
-}
 
 pub fn run() -> Result<()> {
     // Best-effort app-menu integration for cargo-install users.
@@ -136,7 +128,7 @@ pub fn run() -> Result<()> {
         let handle = window;
         cx.spawn(async move |cx| {
             for _ in 0..100 {
-                if let Some(addr) = find_own_address() {
+                if let Some(addr) = ctl::own_address() {
                     let _ = handle.update(cx, |view, _, cx| view.set_address(addr, cx));
                     return;
                 }
