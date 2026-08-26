@@ -42,12 +42,29 @@ and hover-reveal at the screen edge. Built in Rust with
 
 ## Install
 
+**Arch / Omarchy** — a prebuilt binary, nothing to compile:
+
 ```sh
-cargo install sidetab
+yay -S sidetab-bin
+```
+
+**Anywhere else** — also prebuilt, via
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
+
+```sh
+cargo binstall sidetab
+```
+
+**From source** — correct but slow: gpui's dependency tree is around 1450
+crates, so expect several minutes.
+
+```sh
+cargo install sidetab      # or: yay -S sidetab
 ```
 
 Requires Hyprland ≥ 0.53 (new windowrule syntax), Vulkan, and Rust 1.85+
-if building from source.
+if building from source. The prebuilt binaries are built against glibc 2.35
+and are tested on Omarchy 4.
 
 ### App menu entry
 

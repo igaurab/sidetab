@@ -10,6 +10,14 @@ readme = "README.md"
 keywords = ["hyprland", "wayland", "window-switcher", "alt-tab", "gpui"]
 categories = ["gui", "command-line-utilities"]
 
+# `cargo install sidetab` compiles ~1450 crates (gpui's tree is enormous) and
+# takes many minutes. `cargo binstall sidetab` fetches the prebuilt binary that
+# the release workflow attaches to each GitHub release instead, in seconds.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }"
+
 [dependencies]
 gpui = "0.2"
 serde = { version = "1", features = ["derive"] }
