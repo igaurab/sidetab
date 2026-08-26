@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The panel no longer disappears for good after a screen lock, suspend, or
+  monitor power-cycle.** Removing an output makes Hyprland orphan that
+  monitor's workspaces — it reports them as `monitor: -1` — and any window
+  sitting on one goes with it. `pin` is no rescue: it only makes a window
+  follow the active workspace of its *own* monitor, so a pinned panel on an
+  orphan is pinned to nothing and stays invisible and unfocusable forever.
+  Nothing looked broken from the outside — the daemon, its event reader and
+  its cursor poll all kept running, quietly moving a window nobody could see —
+  and only restarting the daemon brought it back. sidetab now watches the
+  monitor events (it dropped them entirely before) and moves its window back
+  onto a live workspace, so this recovers on its own.
+- The settings window failing to open is reported instead of silently doing
+  nothing, and a stale handle from a closed window no longer suppresses
+  re-opening it.
+
+### Added
+
+- **`sidetab ping`** health-checks the daemon: `pong ok`, `pong repaired` if it
+  found and fixed a stranded panel, or `pong lost`. The reply is produced on
+  the UI thread rather than the socket thread, so it reflects whether sidetab
+  is actually running — not merely that the process exists.
+- `settings`, `search`, `toggle` and `show` run that check first and replace a
+  daemon that has genuinely stopped responding. The Alt-Tab commands
+  deliberately skip it: they run on every keypress. A forced replacement drops
+  the session-only "Pinned" window list.
+
+### Internal
+
+- The Hyprland command socket has read/write timeouts. It is called inline from
+  the UI thread, so a half-open socket across a suspend used to park the whole
+  loop indefinitely.
+- The control socket has a read timeout too — a client that connected without
+  writing previously wedged every later command, and with it every shortcut.
+
 ## 0.2.1
 
 - **`sidetab install-bindings`** writes the Alt-Tab / Super+Tab shortcuts and

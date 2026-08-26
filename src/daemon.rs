@@ -11,7 +11,7 @@ use gpui::{
     prelude::*, px, size, App, Application, Bounds, WindowBackgroundAppearance, WindowBounds,
     WindowKind, WindowOptions,
 };
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Duration;
@@ -29,22 +29,52 @@ fn bind_control_socket() -> Result<UnixListener> {
     let _ = std::fs::remove_file(&path); // stale socket from a crash
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    // So a client that finds the daemon unresponsive knows what to replace.
+    let _ = std::fs::write(client::pid_path(), std::process::id().to_string());
     Ok(listener)
+}
+
+/// One control-socket request. `reply` is `Some` only for commands whose
+/// answer has to be produced on the gpui main thread.
+pub struct Ctl {
+    pub cmd: String,
+    pub reply: Option<UnixStream>,
+}
+
+/// Write one line back to a client and hang up. Bounded, because a client that
+/// stops reading must never block the gpui loop.
+fn reply_to(stream: Option<UnixStream>, msg: &str) {
+    if let Some(mut s) = stream {
+        let _ = s.set_write_timeout(Some(Duration::from_millis(200)));
+        let _ = writeln!(s, "{msg}");
+        let _ = s.shutdown(std::net::Shutdown::Write);
+    }
 }
 
 fn spawn_control_listener(
     listener: UnixListener,
-) -> futures::channel::mpsc::UnboundedReceiver<String> {
+) -> futures::channel::mpsc::UnboundedReceiver<Ctl> {
     let (tx, rx) = futures::channel::mpsc::unbounded();
     std::thread::Builder::new()
         .name("control-socket".into())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
+                // This loop accepts one connection at a time, so without a
+                // read timeout a client that connects and never writes wedges
+                // every later command — and with it every keybind.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                let reply = stream.try_clone().ok();
                 let mut line = String::new();
                 let mut reader = std::io::BufReader::new(stream);
                 if reader.read_line(&mut line).is_ok() {
                     let cmd = line.trim().to_string();
-                    if !cmd.is_empty() && tx.unbounded_send(cmd).is_err() {
+                    if cmd.is_empty() {
+                        continue;
+                    }
+                    // Hand the socket off and keep accepting: a slow health
+                    // check must not stall unrelated commands.
+                    let reply = if cmd == "ping" { reply } else { None };
+                    if tx.unbounded_send(Ctl { cmd, reply }).is_err() {
                         return;
                     }
                 }
@@ -145,33 +175,58 @@ pub fn run() -> Result<()> {
         cx.spawn(async move |cx| {
             let mut settings_window: Option<gpui::WindowHandle<crate::ui::settings::Settings>> =
                 None;
+            enum Item {
+                Ctl(Ctl),
+                Event(HyprEvent),
+            }
             let mut stream = futures::stream::select(
-                cmd_rx.map(Msg::Cmd),
-                event_rx.map(Msg::Event),
+                cmd_rx.map(Item::Ctl),
+                event_rx.map(Item::Event),
             );
-            while let Some(msg) = stream.next().await {
-                if let Msg::Cmd(cmd) = &msg {
-                    match cmd.as_str() {
+            while let Some(item) = stream.next().await {
+                let msg = match item {
+                    Item::Event(ev) => Msg::Event(ev),
+                    Item::Ctl(mut ctl) => match ctl.cmd.as_str() {
                         "quit" => {
+                            reply_to(ctl.reply.take(), "bye");
                             let _ = cx.update(|cx| cx.quit());
                             return;
                         }
+                        // Answered from inside handle.update, so a reply
+                        // proves the gpui main loop is actually pumping — a
+                        // reply from the socket thread would only prove that
+                        // *thread* is alive. And it runs the real anchor
+                        // check, because the daemon stays perfectly healthy
+                        // while the panel is stranded.
+                        "ping" => {
+                            let status = handle
+                                .update(cx, |view, _, cx| view.health_check(cx))
+                                .unwrap_or_else(|_| "pong window-gone".to_string());
+                            reply_to(ctl.reply.take(), &status);
+                            continue;
+                        }
                         "settings" => {
                             // focus the existing window, or open a fresh one
-                            let focused = settings_window
-                                .as_ref()
-                                .and_then(|w| {
-                                    w.update(cx, |_, window, _| window.activate_window()).ok()
-                                })
-                                .is_some();
-                            if !focused {
-                                settings_window = open_settings(handle, cx).ok();
+                            let alive = settings_window.as_ref().is_some_and(|w| {
+                                w.update(cx, |_, window, _| window.activate_window()).is_ok()
+                            });
+                            if !alive {
+                                settings_window = None;
+                                match open_settings(handle, cx) {
+                                    Ok(w) => settings_window = Some(w),
+                                    // Was swallowed with .ok(), which made a
+                                    // failure look like "the command does
+                                    // nothing at all".
+                                    Err(e) => eprintln!(
+                                        "sidetab: could not open the settings window: {e:#}"
+                                    ),
+                                }
                             }
                             continue;
                         }
-                        _ => {}
-                    }
-                }
+                        _ => Msg::Cmd(ctl.cmd),
+                    },
+                };
                 if handle
                     .update(cx, |view, window, cx| view.handle_msg(msg, window, cx))
                     .is_err()
@@ -184,5 +239,6 @@ pub fn run() -> Result<()> {
     });
 
     let _ = std::fs::remove_file(client::socket_path());
+    let _ = std::fs::remove_file(client::pid_path());
     Ok(())
 }

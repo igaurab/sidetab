@@ -28,6 +28,7 @@ COMMANDS:
     hide      hide the panel
     search    open the panel with keyboard focus and fuzzy search
     settings  open the settings window
+    ping      health-check the daemon (pong ok | pong repaired | pong lost)
     setup     install the app-menu entry and icon (also done on daemon start)
     install-bindings
               add the Alt-Tab / Super+Tab shortcuts and the daemon autostart
@@ -85,9 +86,20 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("quit") => client::send("quit"),
+        Some("ping") => {
+            println!("{}", client::probe(std::time::Duration::from_secs(2))?);
+            Ok(())
+        }
         Some(cmd) => {
             client::validate(cmd)?;
-            client::send(cmd)
+            match cmd {
+                // User-initiated and latency-tolerant: make sure the daemon
+                // is really pumping, and replace it if it is not.
+                "settings" | "search" | "toggle" | "show" => client::send_checked(cmd),
+                // Alt-Tab hot path (next/prev/next-ws/prev-ws/commit/hide):
+                // never add a round-trip here, it runs on every keypress.
+                _ => client::send(cmd),
+            }
         }
     }
 }
