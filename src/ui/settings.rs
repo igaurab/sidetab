@@ -61,6 +61,11 @@ pub struct Settings {
     overlay_track_bounds: Option<Bounds<Pixels>>,
     /// Result of the last "Install shortcuts" click, shown under the button.
     bindings_status: Option<String>,
+    /// Set once the Restart button has been clicked. The daemon (and this
+    /// window with it) is about to be killed, so this only ever shows for the
+    /// moment in between — long enough for the click to feel answered, or to
+    /// report a helper that never started.
+    restart_status: Option<String>,
 }
 
 impl Settings {
@@ -79,6 +84,7 @@ impl Settings {
             width_track_bounds: None,
             overlay_track_bounds: None,
             bindings_status: None,
+            restart_status: None,
         }
     }
 
@@ -1094,7 +1100,52 @@ impl Settings {
             .child(list)
     }
 
-    fn about_pane(&self, u: &Ui) -> gpui::Div {
+    /// Kill the daemon and start a fresh one.
+    ///
+    /// The panel is a single long-lived Hyprland window, and a few things can
+    /// leave it wrong in a way no amount of re-placing fixes — most often it
+    /// never learned its own Hyprland address, so `place` has nothing to move
+    /// and Hyprland's own floating placement (dead center of the screen) is
+    /// what stays on screen. A fresh window is the repair.
+    fn restart_block(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .pt(px(18.))
+            .child(self.heading("Troubleshooting", u))
+            .child(self.row(
+                "Restart sidetab",
+                self.chip(
+                    ("restartdaemon", 0),
+                    "Restart".to_string(),
+                    true,
+                    |this, cx| {
+                        this.restart_status = Some(match crate::client::spawn_restart() {
+                            Ok(()) => "Restarting… this window will close.".to_string(),
+                            Err(e) => format!("Couldn't restart: {e}"),
+                        });
+                        cx.notify();
+                    },
+                    u,
+                    cx,
+                ),
+                u,
+            ))
+            .child(self.hint(
+                match &self.restart_status {
+                    Some(msg) => msg.clone(),
+                    None => "Closes the panel and opens a new one. Use this if the \
+                             panel shows up in the middle of the screen, stops \
+                             appearing, or stops responding. Your settings are kept; \
+                             this window closes."
+                        .to_string(),
+                },
+                u,
+            ))
+    }
+
+    fn about_pane(&self, u: &Ui, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .flex()
             .flex_col()
@@ -1122,6 +1173,7 @@ impl Settings {
                 format!("Config: {}", crate::config::config_path().display()),
                 u,
             ))
+            .child(self.restart_block(u, cx))
     }
 }
 
@@ -1200,7 +1252,7 @@ impl Render for Settings {
             Section::Shortcuts => self.shortcuts_pane(&u, cx),
             Section::Appearance => self.appearance_pane(&u, cx),
             Section::PinnedApps => self.pinned_pane(&u, window, cx),
-            Section::About => self.about_pane(&u),
+            Section::About => self.about_pane(&u, cx),
         };
 
         div()
