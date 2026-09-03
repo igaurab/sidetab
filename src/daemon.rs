@@ -194,9 +194,9 @@ pub fn run() -> Result<()> {
                         // Answered from inside handle.update, so a reply
                         // proves the gpui main loop is actually pumping — a
                         // reply from the socket thread would only prove that
-                        // *thread* is alive. And it runs the real anchor
-                        // check, because the daemon stays perfectly healthy
-                        // while the panel is stranded.
+                        // *thread* is alive. And it verifies (and repairs)
+                        // the panel window itself, because the daemon stays
+                        // perfectly healthy while the panel is missing.
                         "ping" => {
                             let status = handle
                                 .update(cx, |view, _, cx| view.health_check(cx))

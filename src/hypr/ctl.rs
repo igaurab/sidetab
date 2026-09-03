@@ -69,8 +69,6 @@ pub enum Dsp<'a> {
     ResizeExact { w: i64, h: i64, addr: &'a str },
     MoveExact { x: i64, y: i64, addr: &'a str },
     Tag { add: bool, tag: &'a str, addr: &'a str },
-    /// Re-home a window onto `ws` without following it there.
-    MoveToWorkspaceSilent { ws: i64, addr: &'a str },
     /// Hyprland's `pin` takes no on/off argument in either spelling — it is a
     /// bare toggle, so callers must read `Client::pinned` first.
     TogglePin(&'a str),
@@ -97,9 +95,6 @@ impl Dsp<'_> {
             Dsp::Tag { add, tag, addr } => {
                 let sign = if *add { '+' } else { '-' };
                 format!("dispatch tagwindow {sign}{tag} address:{addr}")
-            }
-            Dsp::MoveToWorkspaceSilent { ws, addr } => {
-                format!("dispatch movetoworkspacesilent {ws},address:{addr}")
             }
             Dsp::TogglePin(addr) => format!("dispatch pin address:{addr}"),
             Dsp::FocusWindow(addr) => format!("dispatch focuswindow address:{addr}"),
@@ -142,10 +137,6 @@ impl Dsp<'_> {
                     win(addr)
                 )
             }
-            Dsp::MoveToWorkspaceSilent { ws, addr } => format!(
-                "dispatch hl.dsp.window.move({{ workspace = {ws}, silent = true, {} }})",
-                win(addr)
-            ),
             Dsp::TogglePin(addr) => format!("dispatch hl.dsp.window.pin({{ {} }})", win(addr)),
             Dsp::FocusWindow(addr) => format!("dispatch hl.dsp.focus({{ {} }})", win(addr)),
             // The Lua focus dispatcher has no current-or-last toggle; `last`
@@ -180,40 +171,9 @@ pub fn dispatch(d: Dsp) -> Result<()> {
     request(&d.encode()).map(|_| ())
 }
 
-/// Like [`dispatch`], but fails when Hyprland rejects the command instead of
-/// discarding the reply. A misspelled Lua dispatcher is otherwise a silent
-/// no-op, which is exactly how a repair path fails without anyone noticing.
-pub fn dispatch_checked(d: Dsp) -> Result<()> {
-    let cmd = d.encode();
-    let reply = request(&cmd)?;
-    if reply.trim() == "ok" {
-        Ok(())
-    } else {
-        anyhow::bail!("hyprland rejected `{cmd}`: {}", reply.trim())
-    }
-}
-
 /// One connection, many dispatchers.
 pub fn dispatch_all(ds: &[Dsp]) -> Result<()> {
     batch(&ds.iter().map(Dsp::encode).collect::<Vec<_>>())
-}
-
-/// Like [`dispatch_all`], but fails unless Hyprland accepted every command.
-///
-/// A batch answers one reply per command joined by blank lines — `ok\n\n\nok`
-/// when both landed, and the offending entry replaced by `error: ...` when one
-/// did not. Callers that cache state on the result need to know the
-/// difference; a rejected dispatch is otherwise a silent no-op.
-pub fn dispatch_all_checked(ds: &[Dsp]) -> Result<()> {
-    let cmds: Vec<String> = ds.iter().map(Dsp::encode).collect();
-    if cmds.is_empty() {
-        return Ok(());
-    }
-    let reply = request(&format!("[[BATCH]]{}", cmds.join(";")))?;
-    if let Some(bad) = reply.split("\n\n\n").find(|r| r.trim() != "ok") {
-        anyhow::bail!("hyprland rejected a dispatch: {}", bad.trim());
-    }
-    Ok(())
 }
 
 /// Re-read the Hyprland config. Both parsers accept this verbatim.
@@ -347,11 +307,9 @@ pub fn active_address() -> Option<String> {
         .and_then(|w| w.address)
 }
 
-/// Rules that make the panel behave: floating, chromeless, instant, and never
-/// taking keyboard focus (hover must not steal focus with follow_mouse=1).
-/// Re-applied on configreloaded.
-///
-/// Notably *not* pinned: see [`crate::ui::panel::Switcher::place`].
+/// Rules that make the panel behave: floating, pinned across workspaces,
+/// chromeless, instant, and never taking keyboard focus (hover must not
+/// steal focus with follow_mouse=1). Re-applied on configreloaded.
 pub fn apply_panel_rules() -> Result<()> {
     let rounding = crate::config::CARD_ROUNDING as i64;
     // (legacy rule body, Lua rule table) — the same rule in both spellings.
@@ -360,6 +318,14 @@ pub fn apply_panel_rules() -> Result<()> {
     let rules = [
         ("float on, match:class sidetab".to_string(),
          "{ float = true, match = { class = '^sidetab$' } }".to_string()),
+        // pin is what carries the panel across workspace switches; sidetab
+        // 0.2.2 replaced it with movetoworkspacesilent calls of its own and
+        // that made the panel flicker and stray mid-screen — see CHANGELOG
+        // 0.2.4. Hyprland can briefly clamp the pinned parked panel on
+        // screen when switching to an empty workspace; the delayed re-park
+        // in the WindowsChanged handler covers that.
+        ("pin on, match:class sidetab".to_string(),
+         "{ pin = true, match = { class = '^sidetab$' } }".to_string()),
         ("no_anim on, match:class sidetab".to_string(),
          "{ no_anim = true, match = { class = '^sidetab$' } }".to_string()),
         // no_focus is tag-scoped so the daemon can lift it for search mode
@@ -399,21 +365,6 @@ pub fn apply_panel_rules() -> Result<()> {
             .collect::<Vec<_>>(),
     };
     batch(&cmds)
-}
-
-/// Re-home a window onto a live workspace.
-///
-/// A monitor unplug (screen lock, DPMS, KVM switch, undock) orphans that
-/// monitor's workspaces — Hyprland reports them as `monitor: -1` — and takes
-/// any window on them along. `pin` is no rescue: it only makes a window follow
-/// the active workspace *of its own monitor*, so a pinned window on an orphan
-/// is pinned to nothing and stays invisible and input-dead forever. Moving it
-/// back is the only fix.
-pub fn reanchor(address: &str, workspace: i64) -> Result<()> {
-    dispatch_checked(Dsp::MoveToWorkspaceSilent {
-        ws: workspace,
-        addr: address,
-    })
 }
 
 pub const CHROMELESS_TAG: &str = "sidetab-chromeless";
