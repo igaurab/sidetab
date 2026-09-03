@@ -29,6 +29,8 @@ COMMANDS:
     search    open the panel with keyboard focus and fuzzy search
     settings  open the settings window
     ping      health-check the daemon (pong ok | pong repaired | pong lost)
+    restart   stop the running daemon and start a fresh one (fixes a panel
+              that has ended up mispositioned or stops responding)
     setup     install the app-menu entry and icon (also done on daemon start)
     install-bindings
               add the Alt-Tab / Super+Tab shortcuts and the daemon autostart
@@ -86,6 +88,11 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("quit") => client::send("quit"),
+        Some("restart") => {
+            client::restart()?;
+            println!("sidetab restarted");
+            Ok(())
+        }
         Some("ping") => {
             println!("{}", client::probe(std::time::Duration::from_secs(2))?);
             Ok(())

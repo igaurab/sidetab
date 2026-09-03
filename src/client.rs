@@ -34,7 +34,7 @@ pub fn send(command: &str) -> Result<()> {
 
 /// How long a healthy daemon gets to answer `ping`.
 ///
-/// A healthy answer takes ~2ms, but the handler runs the anchor check on the
+/// A healthy answer takes ~2ms, but the handler checks the panel window on the
 /// gpui main thread, and each Hyprland round-trip it makes is itself bounded
 /// by `ctl::READ_TIMEOUT` — so a slow-but-alive compositor (exactly the
 /// post-suspend case this feature exists for) can legitimately take seconds.
@@ -102,7 +102,10 @@ fn wait_until(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {
 /// Two clients racing here would both kill and both spawn, and the loser's
 /// daemon would exit on bind ("already running") *after* having killed the
 /// winner's — leaving none. The lock file makes the loser wait instead.
-fn restart() -> Result<()> {
+///
+/// Must run in a *client* process: see [`spawn_restart`] for why the daemon
+/// cannot do this to itself.
+pub fn restart() -> Result<()> {
     let lock = socket_path().with_extension("restart");
     // A holder that crashed leaves the lock behind; treat a stale one as free.
     if let Ok(meta) = std::fs::metadata(&lock) {
@@ -169,6 +172,25 @@ fn do_restart() -> Result<()> {
     } else {
         bail!("the replacement daemon did not come up")
     }
+}
+
+/// Ask a detached helper process to restart the daemon.
+///
+/// This is the entry point for a restart requested from inside the daemon
+/// (the Restart button in settings). The daemon cannot run [`restart`]
+/// itself: `daemon_pid` deliberately skips the calling process, so the kill
+/// step would be a no-op and the spawn step would leave a second daemon
+/// bound to a fresh socket while the first one keeps its panel window.
+/// `sidetab restart` in a separate process sees us as the daemon to replace.
+pub fn spawn_restart() -> Result<()> {
+    Command::new(std::env::current_exe()?)
+        .arg("restart")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("could not spawn the sidetab restart helper")?;
+    Ok(())
 }
 
 /// For user-initiated commands: check the daemon is really pumping before

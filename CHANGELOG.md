@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.2.4
+
+The panel placement is rolled back to the 0.2.1 model. 0.2.2 rewrote how the
+panel follows workspaces and it made things worse in daily use; this release
+reverts that rewrite and keeps only the parts of 0.2.2 that proved sound.
+
+### Issues fixed
+
+- **Issue: the panel flickered constantly** (regression introduced in 0.2.2).
+  0.2.2 removed the `pin` window rule and instead moved the panel between
+  workspaces itself with `movetoworkspacesilent`, batched with the resize and
+  move that park it offscreen. On Hyprland 0.56 that move re-homes the
+  floating window and can reposition it *after* the batched park lands, so on
+  workspace switches the panel appeared on screen for a few frames before the
+  next event shoved it back off. The same churn hit the centered Alt-Tab
+  overlay, which re-placed itself on every window event while cycling
+  (`Mode::Cycling => place(true)`), making the overlay flicker too.
+- **Issue: the panel randomly ended up sitting in the middle of the screen**
+  (regression introduced in 0.2.2, worsened by 0.2.2's own repair logic).
+  Two paths led there. (1) If the daemon never discovered its own window's
+  Hyprland address — a startup race — nothing ever placed the window, so it
+  stayed exactly where Hyprland puts a new floating window: dead center,
+  fully visible. (2) The 0.2.2 re-anchoring machinery (`ensure_anchored`)
+  moved the panel across workspaces outside the placement path; when its
+  cached workspace went stale or a dispatch was rejected, the panel was left
+  wherever Hyprland had dropped it, on screen, until some later event
+  happened to re-park it.
+
+### How they were fixed
+
+- **Reverted to the `pin` rule** for workspace-following (the 0.2.1 model):
+  Hyprland itself carries the panel to every workspace, and sidetab only ever
+  resizes and positions it. The known cosmetic cost of `pin` — Hyprland can
+  clamp the parked panel on screen for a frame when switching to an *empty*
+  workspace — is handled the way 0.2.1 handled it, with an immediate park
+  plus a delayed re-park 200ms later.
+- **Removed the re-anchoring machinery** (`ensure_anchored`, the monitor
+  added/removed and focused-monitor event handlers, `movetoworkspacesilent`).
+  The panel's placement now has exactly one writer, `place`, and it never
+  moves the window between workspaces.
+- **The never-learned-address failure now heals itself.** A 15-second
+  watchdog adopts the window if the 5-second startup discovery missed it, and
+  `sidetab ping` does the same repair on demand — adoption pins, de-chromes
+  and parks the window, which is precisely what a center-of-screen stray
+  needs.
+
+### Added
+
+- **A Restart button** in Settings → About (and a `sidetab restart` command).
+  Kills the running daemon and starts a fresh one — settings are kept. The
+  escape hatch for any state no automatic repair covers.
+
+### Known trade-offs
+
+- 0.2.2's monitor-unplug recovery is gone with the revert: after a screen
+  lock, suspend, or monitor swap, a panel stranded on an orphaned workspace
+  no longer auto-migrates. `settings`, `search`, `toggle` and `show` still
+  health-check the daemon and replace one that stopped answering, and the new
+  Restart button / `sidetab restart` recovers everything else in one click.
+  If stranding turns out to matter in practice, it should come back as a
+  *re-pin* (unpin + move + pin) confined to the actual unplug event, not as a
+  parallel placement path.
+
 ## 0.2.3
 
 Install without compiling.
@@ -15,6 +78,13 @@ Install without compiling.
 No changes to sidetab itself — 0.2.2's fixes are the current behaviour.
 
 ## 0.2.2
+
+> **Retrospective (written for 0.2.4):** the two placement changes below — the
+> self-managed workspace-following and the monitor re-anchoring — turned out
+> to be a net regression. They traded 0.2.1's one cosmetic frame-glitch for
+> constant flicker and a panel that could stray to the middle of the screen.
+> Both were reverted in 0.2.4. The health check, daemon replacement, and
+> socket timeouts from this release survived and are still in place.
 
 ### Fixed
 

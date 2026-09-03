@@ -10,22 +10,9 @@ use crate::windows::{self, Group, WinEntry};
 use gpui::{
     div, img, prelude::*, px, rgba, Context, FocusHandle, KeyDownEvent, MouseButton, Window,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const NOFOCUS_TAG: &str = "sidetab-nofocus";
-
-/// Outcome of the panel's "am I still on a real monitor?" check.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Anchor {
-    /// On a live monitor.
-    Ok,
-    /// Was stranded, and has been moved back.
-    Repaired,
-    /// Our window is not in the client list at all.
-    Lost,
-    /// Hyprland did not answer.
-    Unknown,
-}
 
 const ROW_H: f32 = 26.0;
 const GROUP_HEADER_H: f32 = 24.0;
@@ -102,11 +89,6 @@ pub struct Switcher {
     scope: Scope,
     /// our own Hyprland window address (discovered after mapping)
     address: Option<String>,
-    /// last time `ensure_anchored` actually queried Hyprland, for throttling
-    last_anchor_check: Option<Instant>,
-    /// workspace the panel was last moved to. Cached because `place` runs on
-    /// every reveal/park and must not ask Hyprland where its own window is.
-    panel_ws: Option<i64>,
     /// live width-drag: window sits at `width_preview_park`, card renders
     /// this wide
     width_preview: Option<f32>,
@@ -155,21 +137,20 @@ impl Switcher {
             }
         })
         .detach();
-        // Slow safety net for a stranding whose monitor events we never saw —
-        // the event socket can be down across the very unplug that causes it.
-        // Deliberately not folded into poll_edge above: that loop already
-        // makes two blocking Hyprland round-trips every 180ms on the main
-        // thread, and this adds one every 15s, ~1/166th the traffic.
+        // Slow safety net for the one placement failure that never heals on
+        // its own: the startup discovery missing our window. Without an
+        // address `place` has nothing to move, so the panel just sits where
+        // Hyprland first put a floating window — dead center of the screen.
+        // Gated on `address`, so in the steady state this costs nothing.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(Duration::from_secs(15))
                 .await;
             let alive = this.update(cx, |this, cx| {
-                // Not gated on `address`: ensure_anchored clears it when the
-                // window vanishes from the client list, and its pid fallback
-                // is then the only thing that can find the window again.
-                if this.mode == Mode::Hidden {
-                    this.ensure_anchored(cx);
+                if this.address.is_none() {
+                    if let Some(addr) = ctl::own_address() {
+                        this.set_address(addr, cx);
+                    }
                 }
             });
             if alive.is_err() {
@@ -195,8 +176,6 @@ impl Switcher {
             mode: Mode::Hidden,
             scope: Scope::All,
             address: None,
-            last_anchor_check: None,
-            panel_ws: None,
             width_preview: None,
             width_preview_park: crate::config::WIDTH_MAX,
             preview_centered: false,
@@ -217,11 +196,11 @@ impl Switcher {
     pub fn set_address(&mut self, address: String, cx: &mut Context<Self>) {
         let _ = ctl::remove_chrome(&address);
         self.address = Some(address);
-        // sidetab used to keep the panel pinned, and a `keyword` rule from an
-        // earlier daemon stays registered with Hyprland until a config reload
-        // — so on upgrade this window can still map pinned, bringing back the
-        // workspace-switch flicker `place` now avoids. Clear it once here.
-        self.unpin_self();
+        // The pin rule applies when a window maps, but a panel adopted late
+        // (or one whose pin a 0.2.2/0.2.3 daemon toggled off) can be live and
+        // unpinned — and an unpinned panel is left behind on every workspace
+        // switch. Pin is a bare toggle, so check before flipping it.
+        self.ensure_pinned();
         self.set_nofocus(true);
         // the freshly mapped window may have grabbed focus before the
         // nofocus tag landed — give it back
@@ -231,122 +210,43 @@ impl Switcher {
         self.rest(cx);
     }
 
-    /// Minimum gap between two real anchor checks on the reveal path.
-    const ANCHOR_THROTTLE: Duration = Duration::from_secs(5);
-
-    /// Cheap wrapper for hot-ish paths: skips the round-trips if we looked
-    /// recently.
-    fn ensure_anchored_throttled(&mut self, cx: &mut Context<Self>) -> Anchor {
-        match self.last_anchor_check {
-            Some(t) if t.elapsed() < Self::ANCHOR_THROTTLE => Anchor::Ok,
-            _ => self.ensure_anchored(cx),
-        }
-    }
-
-    /// The invariant: our window exists, and it lives on a workspace that
-    /// belongs to a live monitor.
-    ///
-    /// A monitor unplug orphans that monitor's workspaces (`monitor: -1`) and
-    /// takes the panel with them. Nothing recovers on its own — `pin` only
-    /// follows the active workspace of a window's *own* monitor — so the panel
-    /// stays invisible and input-dead while the daemon happily keeps moving it
-    /// around a workspace nobody can see. See [`ctl::reanchor`].
-    ///
-    /// Costs two Hyprland round-trips on the main thread; never call it from
-    /// `poll_edge`.
-    fn ensure_anchored(&mut self, cx: &mut Context<Self>) -> Anchor {
-        self.last_anchor_check = Some(Instant::now());
-        let (Ok(clients), Ok(mons)) = (ctl::clients(), ctl::monitors()) else {
-            // Hyprland unreachable — don't let a failed probe start the
-            // throttle, or we skip the next real check too.
-            self.last_anchor_check = None;
-            return Anchor::Unknown;
-        };
-
-        let me = std::process::id() as i64;
-        let Some(mine) = self
-            .address
-            .as_ref()
-            .and_then(|a| clients.iter().find(|c| &c.address == a))
-            .or_else(|| {
-                clients
-                    .iter()
-                    .find(|c| c.class == ctl::PANEL_CLASS && c.pid == me)
-            })
-        else {
-            // The surface is gone; gpui owns it, so there is nothing to
-            // repair from in here. Clearing the address lets the pid fallback
-            // above adopt the window if it comes back.
-            self.address = None;
-            self.panel_ws = None;
-            return Anchor::Lost;
-        };
-
-        // A monitor that is removed and re-added comes back with a *new* id,
-        // so a stale id can outlive its monitor — check membership, not just
-        // the -1 sentinel.
-        let live = mine.monitor >= 0 && mons.iter().any(|m| m.id == mine.monitor);
-        let addr = mine.address.clone();
-        let pinned = mine.pinned;
-        // This is the only place that learns where the window really is, so
-        // it is also where the cache `place` relies on gets reconciled.
-        self.panel_ws = Some(mine.workspace.id);
-        // The panel must never be pinned — see `place`. A rule from an older
-        // sidetab stays registered with Hyprland until a config reload, so
-        // this can come back at runtime.
-        if pinned {
-            let _ = ctl::dispatch(ctl::Dsp::TogglePin(&addr));
-        }
-        if self.address.as_ref() != Some(&addr) {
-            self.address = Some(addr.clone());
-        }
-        if live {
-            return Anchor::Ok;
-        }
-
-        let Ok(target) = ctl::focused_monitor() else {
-            // Still stranded: leave the throttle disarmed so the next reveal
-            // retries rather than trusting this failed look for 5s.
-            self.last_anchor_check = None;
-            return Anchor::Unknown;
-        };
-        if let Err(e) = ctl::reanchor(&addr, target.active_workspace.id) {
-            eprintln!("sidetab: could not re-anchor the stranded panel: {e:#}");
-            self.last_anchor_check = None;
-            return Anchor::Unknown;
-        }
-        self.panel_ws = Some(target.active_workspace.id);
-        // The move re-maps the window, which drops the keyword-applied rules.
-        let _ = ctl::remove_chrome(&addr);
-        let revealed = self.mode != Mode::Hidden;
-        self.set_nofocus(!revealed);
-        self.place(revealed);
-        cx.notify();
-        eprintln!(
-            "sidetab: panel was stranded on a workspace with no monitor; \
-             re-anchored to workspace {} on {}",
-            target.active_workspace.id, target.name
-        );
-        Anchor::Repaired
-    }
-
-    /// Answer for the `ping` control command. Deliberately runs the real
-    /// invariant check rather than reporting a bare "I'm alive": the daemon
-    /// stays perfectly healthy while the panel is stranded, so thread
-    /// liveness on its own says nothing useful.
+    /// Answer for the `ping` control command. Runs on the gpui main thread,
+    /// so a reply proves the loop is pumping — and it verifies the window is
+    /// real, because the daemon stays perfectly healthy while its panel is
+    /// gone or was never found. Repairs what it can: a window the startup
+    /// discovery missed is adopted (and thereby parked) on the spot.
     pub fn health_check(&mut self, cx: &mut Context<Self>) -> String {
-        match self.ensure_anchored(cx) {
-            Anchor::Ok => "pong ok",
-            Anchor::Repaired => "pong repaired",
-            Anchor::Lost => "pong lost",
-            Anchor::Unknown => "pong hypr-unreachable",
+        let Ok(clients) = ctl::clients() else {
+            return "pong hypr-unreachable".to_string();
+        };
+        if let Some(addr) = &self.address {
+            if clients.iter().any(|c| &c.address == addr) {
+                return "pong ok".to_string();
+            }
+            // Stale address; fall through and let the pid match re-adopt.
+            self.address = None;
         }
-        .to_string()
+        let me = std::process::id() as i64;
+        let found = clients
+            .iter()
+            .find(|c| c.class == ctl::PANEL_CLASS && c.pid == me)
+            .or_else(|| clients.iter().find(|c| c.class == ctl::PANEL_CLASS))
+            .map(|c| c.address.clone());
+        match found {
+            Some(addr) => {
+                // set_address pins, strips chrome and parks — exactly the
+                // repair a center-of-screen stray needs.
+                self.set_address(addr, cx);
+                "pong repaired".to_string()
+            }
+            None => "pong lost".to_string(),
+        }
     }
 
-    /// Drop a stale `pin` on our own window; see [`Switcher::place`] for why
-    /// the panel must not be pinned.
-    fn unpin_self(&mut self) {
+    /// Make sure our window carries Hyprland's `pin`, which is what carries
+    /// the panel across workspace switches. Pin is a bare toggle, so read the
+    /// current state rather than blindly flipping it.
+    fn ensure_pinned(&mut self) {
         let Some(addr) = self.address.clone() else {
             return;
         };
@@ -354,8 +254,7 @@ impl Switcher {
         let Some(me) = clients.iter().find(|c| c.address == addr) else {
             return;
         };
-        self.panel_ws = Some(me.workspace.id);
-        if me.pinned {
+        if !me.pinned {
             let _ = ctl::dispatch(ctl::Dsp::TogglePin(&addr));
         }
     }
@@ -611,49 +510,22 @@ impl Switcher {
         };
         let (x_shown, x_hidden, y, w, h) = self.geometry(&mon);
         let x = if revealed { x_shown } else { x_hidden };
-        let target_ws = mon.active_workspace.id;
-
-        // Follow the active workspace by moving the panel ourselves, batched
-        // with the placement below so it lands in a single frame.
-        //
-        // The `pin` rule used to do this, and it is why the panel flickered on
-        // every workspace switch: Hyprland re-homes a pinned window onto the
-        // new workspace and clamps it back into the monitor, so the parked
-        // panel snapped to x=0 — fully on screen — for a frame or more before
-        // sidetab could shove it off again.
-        //
-        // Guarded on the cached workspace, not issued unconditionally: a
-        // redundant move still emits `movewindow`, which comes back as
-        // WindowsChanged -> park -> place and would spin forever.
-        let move_ws = self.panel_ws != Some(target_ws) && target_ws > 0;
-        let mut ds = Vec::with_capacity(3);
-        if move_ws {
-            ds.push(ctl::Dsp::MoveToWorkspaceSilent {
-                ws: target_ws,
+        // Workspace-following is the pin rule's job (see apply_panel_rules);
+        // place only ever sizes and positions. sidetab 0.2.2 tried moving the
+        // window across workspaces itself and it made things worse — see the
+        // 0.2.4 changelog entry.
+        let _ = ctl::dispatch_all(&[
+            ctl::Dsp::ResizeExact {
+                w,
+                h,
                 addr: &addr,
-            });
-        }
-        ds.push(ctl::Dsp::ResizeExact {
-            w,
-            h,
-            addr: &addr,
-        });
-        ds.push(ctl::Dsp::MoveExact {
-            x,
-            y,
-            addr: &addr,
-        });
-        if !move_ws {
-            let _ = ctl::dispatch_all(&ds);
-            return;
-        }
-        // Checked, because the cache below suppresses every later attempt: a
-        // rejected move that we recorded as done would silently strand the
-        // panel on the workspace it was already on.
-        match ctl::dispatch_all_checked(&ds) {
-            Ok(()) => self.panel_ws = Some(target_ws),
-            Err(e) => eprintln!("sidetab: could not move the panel to workspace {target_ws}: {e:#}"),
-        }
+            },
+            ctl::Dsp::MoveExact {
+                x,
+                y,
+                addr: &addr,
+            },
+        ]);
     }
 
     fn park(&mut self) {
@@ -663,10 +535,6 @@ impl Switcher {
     // ---- presence transitions ----
 
     fn reveal_now(&mut self, cx: &mut Context<Self>) {
-        // Every reveal path funnels through here, so this one call self-heals
-        // a stranded panel on any user-visible action. Throttled: in the
-        // common case it costs nothing.
-        self.ensure_anchored_throttled(cx);
         if self.dirty {
             self.refresh();
         }
@@ -979,28 +847,7 @@ impl Switcher {
 
     fn handle_event(&mut self, ev: HyprEvent, cx: &mut Context<Self>) {
         match ev {
-            // The moment the panel can be orphaned: a monitor going away takes
-            // its workspaces — and anything on them — with it.
-            HyprEvent::MonitorsChanged => {
-                self.ensure_anchored(cx);
-                if self.mode == Mode::Hidden {
-                    self.park();
-                } else {
-                    self.place(true);
-                }
-            }
-            // Fires on ordinary pointer motion across a monitor edge, so this
-            // one is throttled.
-            HyprEvent::FocusedMonitorChanged => {
-                self.ensure_anchored_throttled(cx);
-                if self.mode == Mode::Hidden {
-                    self.park();
-                }
-            }
             HyprEvent::ConfigReloaded => {
-                // Also synthesized after an event-socket EOF, i.e. exactly the
-                // case where monitor events may have been missed.
-                self.ensure_anchored(cx);
                 let _ = ctl::apply_panel_rules();
                 // the rules above are only rules; the window still needs
                 // re-tagging to pick them up
@@ -1021,12 +868,23 @@ impl Switcher {
             HyprEvent::WindowsChanged => match self.mode {
                 Mode::Hidden | Mode::HoverPending => {
                     self.dirty = true;
-                    // `park` also carries the panel to the active workspace
-                    // now (see `place`). The delayed second park that used to
-                    // live here was chasing the `pin` relocation, which no
-                    // longer happens — and the 200ms it stayed on screen was
-                    // the flicker.
+                    // Hyprland relocates the pinned panel into view when
+                    // switching to an empty workspace — shove it back
+                    // offscreen now, and once more shortly after in case
+                    // the relocation lands after this event
                     self.park();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(200))
+                            .await;
+                        this.update(cx, |this, _| {
+                            if matches!(this.mode, Mode::Hidden | Mode::HoverPending) {
+                                this.park();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }
                 Mode::Revealed | Mode::Search => {
                     let keep = self.selected_entry().map(|e| e.address.clone());
@@ -1043,11 +901,9 @@ impl Switcher {
                     self.place(true);
                     cx.notify();
                 }
-                // `pin` used to carry the panel across workspaces on its
-                // own; now only `place` does, so an Alt-Tab held across a
-                // workspace change would otherwise leave the overlay behind
-                // on the old one and the user would commit blind.
-                Mode::Cycling => self.place(true),
+                // pin carries the overlay across a workspace change held
+                // mid-cycle; re-placing here only fights it and flickers.
+                Mode::Cycling => {}
             },
             HyprEvent::ActiveWindowChanged => {
                 self.fullscreen_active = ctl::active_window_fullscreen();
